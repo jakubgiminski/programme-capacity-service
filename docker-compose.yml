@@ -39,13 +39,22 @@ services:
 
   app:
     build: .
-    command: ['sh', '-c', 'node dist/scripts/migrate.js && node dist/src/main.js']
+    command:
+      - sh
+      - -c
+      - node dist/scripts/dev-keys.js && node dist/scripts/migrate.js && node dist/scripts/seed.js && exec node dist/src/main.js
     environment:
       NODE_ENV: production
       PORT: '3000'
       LOG_LEVEL: info
       DATABASE_URL: postgres://capacity:capacity@postgres:5432/capacity
       KAFKA_BROKERS: redpanda:9092
+      JWT_ISSUER: https://auth.local/dev
+      JWT_AUDIENCE: programme-capacity-service
+      JWT_PUBLIC_KEY_FILE: /app/.dev-keys/public.pem
+      DEV_KEYS_DIR: /app/.dev-keys
+    volumes:
+      - dev-keys:/app/.dev-keys
     ports:
       - '3000:3000'
     depends_on:
@@ -57,3 +66,4 @@ services:
 volumes:
   postgres-data:
   redpanda-data:
+  dev-keys:

@@ -39,11 +39,7 @@ export class DeadLetterPublisher {
     @Inject(KAFKA) kafka: Kafka,
     @Inject(DATABASE) private readonly db: Db,
   ) {
-    this.producer = kafka.producer({
-      idempotent: true,
-      maxInFlightRequests: 1,
-      createPartitioner: Partitioners.DefaultPartitioner,
-    });
+    this.producer = kafka.producer({ createPartitioner: Partitioners.DefaultPartitioner });
   }
 
   async connect(): Promise<void> {
