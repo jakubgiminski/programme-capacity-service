@@ -1,15 +1,14 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { importPKCS8, SignJWT } from 'jose';
-import { devKeysDir, ensureDevKeys } from './dev-keys';
+import { privateKeyPath } from './dev-keys';
 import { argument, DEFAULT_AUDIENCE, DEFAULT_ISSUER, runScript } from './script-runner';
 
 runScript(async () => {
-  await ensureDevKeys();
-  const privateKey = await importPKCS8(
-    readFileSync(join(devKeysDir(), 'private.pem'), 'utf8'),
-    'RS256',
-  );
+  const keyPath = privateKeyPath();
+  if (!existsSync(keyPath)) {
+    throw new Error(`No dev signing key at ${keyPath}; run "pnpm keys:dev" first`);
+  }
+  const privateKey = await importPKCS8(readFileSync(keyPath, 'utf8'), 'RS256');
   const ttlSeconds = Number(argument('ttl') ?? '3600');
   if (!Number.isInteger(ttlSeconds) || ttlSeconds <= 0) {
     throw new Error('--ttl must be a positive number of seconds');

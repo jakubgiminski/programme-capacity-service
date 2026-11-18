@@ -13,7 +13,11 @@ export function argument(name: string): string | undefined {
   if (index === -1) {
     return undefined;
   }
-  return process.argv[index + 1];
+  const value = process.argv[index + 1];
+  if (value === undefined || value.startsWith('--')) {
+    throw new Error(`${flag} requires a value`);
+  }
+  return value;
 }
 
 export const DEFAULT_ISSUER = 'https://auth.local/dev';
