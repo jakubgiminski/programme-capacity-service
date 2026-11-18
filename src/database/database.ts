@@ -26,6 +26,7 @@ export function createDatabase(options: DatabaseOptions): Db {
   const pool = new Pool({
     connectionString: options.connectionString,
     max: options.maxConnections,
+    connectionTimeoutMillis: 5_000,
     application_name: options.applicationName ?? 'programme-capacity-service',
     types: typeOverrides(),
   });

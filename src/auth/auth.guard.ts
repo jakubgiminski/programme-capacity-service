@@ -9,7 +9,7 @@ export interface AuthenticatedRequest extends Request {
   principal?: Principal;
 }
 
-const BEARER = /^Bearer ([A-Za-z0-9._~+/-]+=*)$/;
+const BEARER = /^Bearer +([A-Za-z0-9._~+/-]+=*) *$/i;
 
 @Injectable()
 export class AuthGuard implements CanActivate {

@@ -9,11 +9,16 @@ export const CORRELATION_ID_HEADER = 'x-correlation-id';
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 export function resolveCorrelationId(req: IncomingMessage, res: ServerResponse): string {
+  const assigned = (req as IncomingMessage & { id?: unknown }).id;
+  if (typeof assigned === 'string') {
+    return assigned;
+  }
   const header = req.headers[CORRELATION_ID_HEADER];
   const candidate = Array.isArray(header) ? header[0] : header;
   const id =
     candidate !== undefined && CORRELATION_ID_PATTERN.test(candidate) ? candidate : randomUUID();
   res.setHeader(CORRELATION_ID_HEADER, id);
+  (req as IncomingMessage & { id?: unknown }).id = id;
   return id;
 }
 

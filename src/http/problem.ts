@@ -18,3 +18,27 @@ export class RequestValidationError extends Error {
     this.name = 'RequestValidationError';
   }
 }
+
+export class MalformedRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MalformedRequestError';
+  }
+}
+
+export class UnsupportedMediaTypeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnsupportedMediaTypeError';
+  }
+}
+
+export class ServiceUnavailableError extends Error {
+  constructor(
+    message: string,
+    readonly extensions: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = 'ServiceUnavailableError';
+  }
+}

@@ -1,11 +1,22 @@
 import { HttpException, HttpStatus } from '@nestjs/common';
-import { AuthenticationError, AuthorizationError } from '../auth/principal';
+import {
+  AuthenticationError,
+  AuthorizationError,
+  KeyServiceUnavailableError,
+} from '../auth/principal';
 import {
   CapacityError,
   InsufficientCapacityError,
   OverReleaseError,
 } from '../capacity/domain/errors';
-import { type Problem, problemType, RequestValidationError } from './problem';
+import {
+  MalformedRequestError,
+  type Problem,
+  problemType,
+  RequestValidationError,
+  ServiceUnavailableError,
+  UnsupportedMediaTypeError,
+} from './problem';
 
 const CAPACITY_STATUS: Record<string, number> = {
   'program-not-found': HttpStatus.NOT_FOUND,
@@ -75,6 +86,39 @@ export function toProblem(error: unknown): Problem {
       status: 400,
       detail: error.message,
       errors: error.errors,
+    };
+  }
+  if (error instanceof MalformedRequestError) {
+    return {
+      type: problemType('malformed-request'),
+      title: titleFor(400),
+      status: 400,
+      detail: error.message,
+    };
+  }
+  if (error instanceof UnsupportedMediaTypeError) {
+    return {
+      type: problemType('unsupported-media-type'),
+      title: titleFor(415),
+      status: 415,
+      detail: error.message,
+    };
+  }
+  if (error instanceof ServiceUnavailableError) {
+    return {
+      type: problemType('service-unavailable'),
+      title: titleFor(503),
+      status: 503,
+      detail: error.message,
+      ...error.extensions,
+    };
+  }
+  if (error instanceof KeyServiceUnavailableError) {
+    return {
+      type: problemType('authentication-unavailable'),
+      title: titleFor(503),
+      status: 503,
+      detail: 'Token verification keys are temporarily unavailable',
     };
   }
   if (error instanceof AuthenticationError) {

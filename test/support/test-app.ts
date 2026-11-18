@@ -30,7 +30,7 @@ export interface TestApp {
 
 export async function createTestApp(
   database: TestDatabase,
-  overrides: Record<string, string> = {},
+  overrides: Record<string, string | undefined> = {},
 ): Promise<TestApp> {
   const { publicKey, privateKey } = await generateKeyPair('RS256');
   const config = loadConfig({

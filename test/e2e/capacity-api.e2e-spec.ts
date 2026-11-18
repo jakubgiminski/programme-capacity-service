@@ -255,15 +255,63 @@ describe('Capacity HTTP API (e2e)', () => {
       const malformed = await request(server)
         .post('/v1/programs/PRG-1/reservations')
         .set('Authorization', `Bearer ${writeToken}`)
+        .set('X-Correlation-Id', 'corr-malformed')
         .set('Content-Type', 'application/json')
         .send('{"invoiceId":');
       const badId = await request(server)
         .get(`/v1/programs/${'x'.repeat(65)}/capacity`)
         .set('Authorization', `Bearer ${writeToken}`);
+      const dotId = await request(server)
+        .post('/v1/programs/PRG-1/reservations')
+        .set('Authorization', `Bearer ${writeToken}`)
+        .send({ invoiceId: '.', amount: { amount: '100', currency: 'USD' } });
 
       expect(malformed.status).toBe(400);
-      expect(malformed.body.type).toBe('/problems/malformed-request');
+      expect(malformed.headers['x-correlation-id']).toBe('corr-malformed');
+      expect(malformed.body).toMatchObject({
+        type: '/problems/malformed-request',
+        detail: 'Request body is not valid JSON',
+        correlationId: 'corr-malformed',
+      });
       expect(badId.status).toBe(400);
+      expect(dotId.status).toBe(400);
+      expect(dotId.body.type).toBe('/problems/validation-failed');
+    });
+
+    it('authenticates before reading the request body', async () => {
+      const response = await request(server)
+        .post('/v1/programs/PRG-1/reservations')
+        .set('Content-Type', 'application/json')
+        .send('{"invoiceId":');
+
+      expect(response.status).toBe(401);
+    });
+
+    it.each([
+      ['text/plain', 'text/plain'],
+      ['a non UTF-8 charset', 'application/json; charset=iso-8859-1'],
+    ])('rejects %s bodies with 415', async (_label, contentType) => {
+      const response = await request(server)
+        .post('/v1/programs/PRG-1/reservations')
+        .set('Authorization', `Bearer ${writeToken}`)
+        .set('Content-Type', contentType)
+        .send('{"invoiceId":"INV-1","amount":{"amount":"100","currency":"USD"}}');
+
+      expect(response.status).toBe(415);
+      expect(response.headers['content-type']).toMatch(/^application\/problem\+json/);
+      expect(response.body.type).toBe('/problems/unsupported-media-type');
+    });
+
+    it('accepts an explicit UTF-8 charset and a lowercase bearer scheme', async () => {
+      const programId = await newProgram();
+
+      const response = await request(server)
+        .post(`/v1/programs/${programId}/reservations`)
+        .set('Authorization', `bearer ${writeToken}`)
+        .set('Content-Type', 'application/json; charset=UTF-8')
+        .send('{"invoiceId":"INV-1","amount":{"amount":"100","currency":"USD"}}');
+
+      expect(response.status).toBe(201);
     });
   });
 
@@ -308,6 +356,12 @@ describe('Capacity HTTP API (e2e)', () => {
       });
       expect(replay.status).toBe(200);
       expect(full.status).toBe(201);
+      const lateReplay = await request(server)
+        .post(path)
+        .set('Authorization', `Bearer ${writeToken}`)
+        .send({ releaseId: 'REL-1', amount: { amount: '100', currency: 'USD' } });
+      expect(lateReplay.status).toBe(200);
+      expect(lateReplay.body).toEqual(partial.body);
       expect(full.body.freed).toEqual({ amount: '200', currency: 'USD' });
       expect(details.body).toMatchObject({
         status: 'RELEASED',
@@ -348,6 +402,50 @@ describe('Capacity HTTP API (e2e)', () => {
       expect(again.body.type).toBe('/problems/reservation-already-released');
       expect(missing.status).toBe(404);
       expect(missing.body.type).toBe('/problems/reservation-not-found');
+    });
+  });
+
+  describe('unavailable dependencies', () => {
+    it('returns a 503 problem document when the database is unreachable', async () => {
+      const offline = await createTestApp(database, {
+        DATABASE_URL: 'postgres://capacity:capacity@127.0.0.1:1/capacity',
+      });
+      try {
+        const authorization = `Bearer ${await offline.token()}`;
+
+        const response = await request(offline.app.getHttpServer())
+          .get('/health')
+          .set('Authorization', authorization);
+
+        expect(response.status).toBe(503);
+        expect(response.headers['content-type']).toMatch(/^application\/problem\+json/);
+        expect(response.body).toMatchObject({
+          type: '/problems/service-unavailable',
+          status: 503,
+          checks: { database: 'down', kafka: 'disabled' },
+        });
+      } finally {
+        await offline.close();
+      }
+    });
+
+    it('returns 503 instead of 401 when the JWKS endpoint is unreachable', async () => {
+      const offline = await createTestApp(database, {
+        JWT_PUBLIC_KEY: undefined,
+        JWT_JWKS_URL: 'http://127.0.0.1:1/jwks.json',
+      });
+      try {
+        const authorization = `Bearer ${await offline.token()}`;
+
+        const response = await request(offline.app.getHttpServer())
+          .get('/v1/programs/PRG-1/capacity')
+          .set('Authorization', authorization);
+
+        expect(response.status).toBe(503);
+        expect(response.body.type).toBe('/problems/authentication-unavailable');
+      } finally {
+        await offline.close();
+      }
     });
   });
 });

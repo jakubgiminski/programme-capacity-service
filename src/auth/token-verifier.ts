@@ -8,7 +8,7 @@ import {
   type JWTVerifyGetKey,
 } from 'jose';
 import { type AppConfig } from '../config/config';
-import { AuthenticationError, type Principal } from './principal';
+import { AuthenticationError, KeyServiceUnavailableError, type Principal } from './principal';
 
 export const TOKEN_VERIFIER = Symbol('TOKEN_VERIFIER');
 
@@ -44,6 +44,9 @@ export class TokenVerifier {
       });
       return payload;
     } catch (error) {
+      if (error instanceof KeyServiceUnavailableError) {
+        throw error;
+      }
       if (error instanceof errors.JOSEError) {
         throw new AuthenticationError(`Invalid token: ${error.code}`);
       }
@@ -60,9 +63,28 @@ function parseScopes(payload: JWTPayload): ReadonlySet<string> {
   return new Set(scope.split(' ').filter((item) => item.length > 0));
 }
 
+const JWKS_TIMEOUT_MS = 5_000;
+
+export function remoteKeySet(url: URL): JWTVerifyGetKey {
+  const jwks = createRemoteJWKSet(url, { timeoutDuration: JWKS_TIMEOUT_MS });
+  return async (header, token) => {
+    try {
+      return await jwks(header, token);
+    } catch (error) {
+      if (
+        error instanceof errors.JWKSNoMatchingKey ||
+        error instanceof errors.JWKSMultipleMatchingKeys
+      ) {
+        throw error;
+      }
+      throw new KeyServiceUnavailableError(error);
+    }
+  };
+}
+
 async function resolveKey(config: AppConfig): Promise<JWTVerifyGetKey> {
   if (config.JWT_JWKS_URL !== undefined) {
-    return createRemoteJWKSet(new URL(config.JWT_JWKS_URL));
+    return remoteKeySet(new URL(config.JWT_JWKS_URL));
   }
   if (config.JWT_PUBLIC_KEY_FILE !== undefined) {
     const key = await importSPKI(readFileSync(config.JWT_PUBLIC_KEY_FILE, 'utf8'), ALGORITHM);

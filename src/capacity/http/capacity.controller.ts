@@ -1,7 +1,8 @@
-import { Body, Controller, Get, HttpStatus, Inject, Param, Post, Res } from '@nestjs/common';
+import { Controller, Get, HttpStatus, Inject, Param, Post, Res } from '@nestjs/common';
 import { type Response } from 'express';
 import { Scope } from '../../auth/principal';
 import { RequireScope } from '../../auth/require-scope.decorator';
+import { JsonBody } from '../../http/json-body.decorator';
 import { ZodValidationPipe } from '../../http/zod-validation.pipe';
 import { Money } from '../../money';
 import { CapacityQueries } from '../application/capacity-queries';
@@ -54,7 +55,7 @@ export class CapacityController {
   @RequireScope(Scope.Write)
   async reserve(
     @Param('programId', idPipe) programId: string,
-    @Body(new ZodValidationPipe(reserveBodySchema)) body: ReserveBody,
+    @JsonBody(reserveBodySchema) body: ReserveBody,
     @RequestActor() actor: Actor,
     @Res({ passthrough: true }) response: Response,
   ) {
@@ -88,7 +89,7 @@ export class CapacityController {
   async release(
     @Param('programId', idPipe) programId: string,
     @Param('invoiceId', idPipe) invoiceId: string,
-    @Body(new ZodValidationPipe(releaseBodySchema)) body: ReleaseBody,
+    @JsonBody(releaseBodySchema) body: ReleaseBody,
     @RequestActor() actor: Actor,
     @Res({ passthrough: true }) response: Response,
   ) {

@@ -27,3 +27,10 @@ export class AuthorizationError extends Error {
     this.name = 'AuthorizationError';
   }
 }
+
+export class KeyServiceUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super('Token verification keys are unavailable', { cause });
+    this.name = 'KeyServiceUnavailableError';
+  }
+}
