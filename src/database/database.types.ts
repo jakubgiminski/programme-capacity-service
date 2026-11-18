@@ -64,11 +64,74 @@ export interface LedgerEntriesTable {
   created_at: CreatedAt;
 }
 
+export type MessageOutcome = 'APPLIED' | 'PARKED' | 'STALE' | 'REJECTED' | 'SUPERSEDED';
+export type DiscrepancyKind =
+  'TREASURY_AMOUNT_LOWER' | 'MISSING_FROM_SNAPSHOT' | 'RELEASED_LOCALLY' | 'INVOICE_MISMATCH';
+
+export interface ProcessedMessagesTable {
+  message_id: string;
+  program_id: string;
+  revision: bigint;
+  type: string;
+  outcome: MessageOutcome;
+  reason: string | null;
+  source_topic: string;
+  source_partition: number;
+  source_offset: string;
+  received_at: CreatedAt;
+  updated_at: UpdatedAt;
+}
+
+export interface PendingTreasuryMessagesTable {
+  message_id: string;
+  program_id: string;
+  revision: bigint;
+  raw_value: string;
+  source_topic: string;
+  source_partition: number;
+  source_offset: string;
+  received_at: CreatedAt;
+}
+
+export interface TreasuryDeadLettersTable {
+  id: Generated<bigint>;
+  message_id: string | null;
+  program_id: string | null;
+  revision: bigint | null;
+  reason: string;
+  raw_value: string;
+  source_topic: string;
+  source_partition: number;
+  source_offset: string;
+  created_at: CreatedAt;
+  published_at: Date | null;
+}
+
+export interface ReconciliationDiscrepanciesTable {
+  id: Generated<string>;
+  program_id: string;
+  invoice_id: string;
+  kind: DiscrepancyKind;
+  local_status: string | null;
+  local_outstanding_minor: bigint | null;
+  treasury_outstanding_minor: bigint | null;
+  detail: string | null;
+  snapshot_message_id: string;
+  snapshot_revision: bigint;
+  detected_at: CreatedAt;
+  last_seen_at: UpdatedAt;
+  resolved_at: Date | null;
+}
+
 export interface Database {
   programs: ProgramsTable;
   reservations: ReservationsTable;
   releases: ReleasesTable;
   ledger_entries: LedgerEntriesTable;
+  processed_messages: ProcessedMessagesTable;
+  pending_treasury_messages: PendingTreasuryMessagesTable;
+  treasury_dead_letters: TreasuryDeadLettersTable;
+  reconciliation_discrepancies: ReconciliationDiscrepanciesTable;
 }
 
 export type ProgramRow = Selectable<ProgramsTable>;
