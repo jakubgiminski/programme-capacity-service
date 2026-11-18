@@ -4,6 +4,7 @@ import { sql } from 'kysely';
 import { Scope } from '../auth/principal';
 import { RequireScope } from '../auth/require-scope.decorator';
 import { DATABASE, type Db } from '../database/database';
+import { KAFKA_HEALTH, type KafkaHealth } from '../treasury/kafka-health';
 
 type CheckStatus = 'up' | 'down';
 
@@ -11,15 +12,19 @@ const DATABASE_TIMEOUT_MS = 2_000;
 
 @Controller('health')
 export class HealthController {
-  constructor(@Inject(DATABASE) private readonly db: Db) {}
+  constructor(
+    @Inject(DATABASE) private readonly db: Db,
+    @Inject(KAFKA_HEALTH) private readonly kafka: KafkaHealth,
+  ) {}
 
   @Get()
   @RequireScope(Scope.Read)
   async check(@Res({ passthrough: true }) response: Response) {
     const database = await this.checkDatabase();
-    const healthy = database === 'up';
+    const kafka = this.kafka.status();
+    const healthy = database === 'up' && kafka !== 'down';
     response.status(healthy ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE);
-    return { status: healthy ? 'ok' : 'unavailable', checks: { database } };
+    return { status: healthy ? 'ok' : 'unavailable', checks: { database, kafka } };
   }
 
   private async checkDatabase(): Promise<CheckStatus> {

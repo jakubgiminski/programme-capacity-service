@@ -9,6 +9,7 @@ import { FxModule } from './fx/fx.module';
 import { HealthModule } from './health/health.module';
 import { ProblemDetailsFilter } from './http/problem-details.filter';
 import { LoggingModule } from './logging/logging.module';
+import { TreasuryModule } from './treasury/treasury.module';
 
 @Module({})
 export class AppModule {
@@ -22,6 +23,7 @@ export class AppModule {
         FxModule.register(config),
         AuthModule.register(config),
         CapacityModule,
+        TreasuryModule.register(config),
         HealthModule,
       ],
       providers: [{ provide: APP_FILTER, useClass: ProblemDetailsFilter }],
