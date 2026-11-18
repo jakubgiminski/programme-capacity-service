@@ -1,14 +1,8 @@
 import { readFileSync } from 'node:fs';
-import {
-  createRemoteJWKSet,
-  errors,
-  importSPKI,
-  type JWTPayload,
-  jwtVerify,
-  type JWTVerifyGetKey,
-} from 'jose';
+import { errors, importSPKI, type JWTPayload, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import { type AppConfig } from '../config/config';
 import { AuthenticationError, KeyServiceUnavailableError, type Principal } from './principal';
+import { remoteKeySet } from './remote-key-set';
 
 export const TOKEN_VERIFIER = Symbol('TOKEN_VERIFIER');
 
@@ -61,46 +55,6 @@ function parseScopes(payload: JWTPayload): ReadonlySet<string> {
     return new Set();
   }
   return new Set(scope.split(' ').filter((item) => item.length > 0));
-}
-
-const JWKS_TIMEOUT_MS = 5_000;
-
-class KeySetTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`JWKS did not respond within ${String(timeoutMs)} ms`);
-    this.name = 'KeySetTimeoutError';
-  }
-}
-
-async function withDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(new KeySetTimeoutError(timeoutMs));
-    }, timeoutMs);
-  });
-  try {
-    return await Promise.race([work, deadline]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-export function remoteKeySet(url: URL, timeoutMs = JWKS_TIMEOUT_MS): JWTVerifyGetKey {
-  const jwks = createRemoteJWKSet(url, { timeoutDuration: timeoutMs });
-  return async (header, token) => {
-    try {
-      return await withDeadline(jwks(header, token), timeoutMs);
-    } catch (error) {
-      if (
-        error instanceof errors.JWKSNoMatchingKey ||
-        error instanceof errors.JWKSMultipleMatchingKeys
-      ) {
-        throw error;
-      }
-      throw new KeyServiceUnavailableError(error);
-    }
-  };
 }
 
 async function resolveKey(config: AppConfig): Promise<JWTVerifyGetKey> {

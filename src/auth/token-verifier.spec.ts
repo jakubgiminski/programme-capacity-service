@@ -2,7 +2,8 @@ import { createServer, type Server } from 'node:http';
 import { type AddressInfo } from 'node:net';
 import { exportJWK, generateKeyPair, type KeyLike, SignJWT } from 'jose';
 import { AuthenticationError, KeyServiceUnavailableError } from './principal';
-import { remoteKeySet, TokenVerifier } from './token-verifier';
+import { remoteKeySet } from './remote-key-set';
+import { TokenVerifier } from './token-verifier';
 
 const ISSUER = 'https://issuer.test';
 const AUDIENCE = 'programme-capacity-service';
@@ -29,13 +30,14 @@ function listen(server: Server): Promise<URL> {
 
 describe('TokenVerifier with a remote JWKS', () => {
   let privateKey: KeyLike;
+  let jwk: Record<string, unknown>;
   let server: Server;
   let url: URL;
 
   beforeAll(async () => {
     const pair = await generateKeyPair('RS256');
     privateKey = pair.privateKey;
-    const jwk = { ...(await exportJWK(pair.publicKey)), kid: 'key-1', alg: 'RS256', use: 'sig' };
+    jwk = { ...(await exportJWK(pair.publicKey)), kid: 'key-1', alg: 'RS256', use: 'sig' };
     server = createServer((_request, response) => {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ keys: [jwk] }));
@@ -81,7 +83,11 @@ describe('TokenVerifier with a remote JWKS', () => {
       response.write('{"keys":');
     });
     const stalledUrl = await listen(stalled);
-    const verifier = new TokenVerifier(remoteKeySet(stalledUrl, 200), ISSUER, AUDIENCE);
+    const verifier = new TokenVerifier(
+      remoteKeySet(stalledUrl, { timeoutMs: 200 }),
+      ISSUER,
+      AUDIENCE,
+    );
     const started = Date.now();
     try {
       await expect(verifier.verify(await sign(privateKey, 'key-1'))).rejects.toBeInstanceOf(
@@ -91,6 +97,85 @@ describe('TokenVerifier with a remote JWKS', () => {
     } finally {
       stalled.closeAllConnections();
       await new Promise((resolve) => stalled.close(resolve));
+    }
+  });
+
+  it('recovers on the same verifier once a stalled key set endpoint answers again', async () => {
+    let stall = true;
+    const flaky = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      if (stall) {
+        response.write('{"keys":');
+        return;
+      }
+      response.end(JSON.stringify({ keys: [jwk] }));
+    });
+    const flakyUrl = await listen(flaky);
+    const verifier = new TokenVerifier(
+      remoteKeySet(flakyUrl, { timeoutMs: 200 }),
+      ISSUER,
+      AUDIENCE,
+    );
+    const token = await sign(privateKey, 'key-1');
+    try {
+      await expect(verifier.verify(token)).rejects.toBeInstanceOf(KeyServiceUnavailableError);
+      stall = false;
+
+      await expect(verifier.verify(token)).resolves.toMatchObject({ subject: 'erp-service' });
+    } finally {
+      flaky.closeAllConnections();
+      await new Promise((resolve) => flaky.close(resolve));
+    }
+  });
+
+  it('refetches the key set for an unknown key after the cooldown to pick up rotations', async () => {
+    const rotated = await generateKeyPair('RS256');
+    const rotatedJwk = {
+      ...(await exportJWK(rotated.publicKey)),
+      kid: 'key-2',
+      alg: 'RS256',
+      use: 'sig',
+    };
+    let published = [jwk];
+    let requests = 0;
+    const rotating = createServer((_request, response) => {
+      requests += 1;
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ keys: published }));
+    });
+    const rotatingUrl = await listen(rotating);
+    const verifier = new TokenVerifier(
+      remoteKeySet(rotatingUrl, { cooldownMs: 0 }),
+      ISSUER,
+      AUDIENCE,
+    );
+    try {
+      await verifier.verify(await sign(privateKey, 'key-1'));
+      published = [jwk, rotatedJwk];
+
+      await expect(verifier.verify(await sign(rotated.privateKey, 'key-2'))).resolves.toMatchObject(
+        { subject: 'erp-service' },
+      );
+      await verifier.verify(await sign(privateKey, 'key-1'));
+      expect(requests).toBe(2);
+    } finally {
+      await new Promise((resolve) => rotating.close(resolve));
+    }
+  });
+
+  it('reports a key set endpoint that answers with an error status as unavailable', async () => {
+    const failing = createServer((_request, response) => {
+      response.writeHead(503);
+      response.end();
+    });
+    const failingUrl = await listen(failing);
+    const verifier = new TokenVerifier(remoteKeySet(failingUrl), ISSUER, AUDIENCE);
+    try {
+      await expect(verifier.verify(await sign(privateKey, 'key-1'))).rejects.toBeInstanceOf(
+        KeyServiceUnavailableError,
+      );
+    } finally {
+      await new Promise((resolve) => failing.close(resolve));
     }
   });
 });
