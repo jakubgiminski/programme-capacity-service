@@ -111,7 +111,10 @@ describe('Capacity HTTP API (e2e)', () => {
         .set('Authorization', `Bearer ${writeToken}`);
 
       expect(response.status).toBe(200);
-      expect(response.body).toEqual({ status: 'ok', checks: { database: 'up' } });
+      expect(response.body).toEqual({
+        status: 'ok',
+        checks: { database: 'up', kafka: 'disabled' },
+      });
     });
 
     it('returns a problem document for unknown routes', async () => {
@@ -165,6 +168,7 @@ describe('Capacity HTTP API (e2e)', () => {
         utilised: { amount: '108502', currency: 'USD' },
         available: { amount: '891498', currency: 'USD' },
         overUtilised: false,
+        openDiscrepancies: 0,
         version: '1',
         updatedAt: expect.any(String),
       });

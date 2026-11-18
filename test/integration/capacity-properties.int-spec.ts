@@ -5,7 +5,6 @@ import { type CurrencyCode } from '../../src/money';
 import {
   buildCapacityServices,
   type CapacityServices,
-  createProgram,
   EUR,
   expectInvariants,
   FakeFxRateProvider,
@@ -16,12 +15,19 @@ import {
   USD,
 } from '../support/capacity-fixture';
 import { createTestDatabase, type TestDatabase } from '../support/test-database';
+import { inbound, limitSet, snapshot } from '../support/treasury-messages';
 
 type Operation =
   | { kind: 'reserve'; invoice: number; amount: bigint; currency: CurrencyCode }
-  | { kind: 'release'; invoice: number; releaseId: number; amount: bigint | null };
+  | { kind: 'release'; invoice: number; releaseId: number; amount: bigint | null }
+  | { kind: 'limit'; limit: bigint }
+  | {
+      kind: 'snapshot';
+      limit: bigint;
+      entries: { invoice: number; booked: bigint }[];
+    };
 
-const invoiceArb = fc.integer({ min: 0, max: 5 });
+const invoiceArb = fc.integer({ min: 0, max: 8 });
 
 const operationArb: fc.Arbitrary<Operation> = fc.oneof(
   fc.record({
@@ -35,6 +41,21 @@ const operationArb: fc.Arbitrary<Operation> = fc.oneof(
     invoice: invoiceArb,
     releaseId: fc.integer({ min: 0, max: 3 }),
     amount: fc.option(fc.bigInt({ min: 1n, max: 200_000n }), { nil: null }),
+  }),
+  fc.record({
+    kind: fc.constant('limit' as const),
+    limit: fc.bigInt({ min: 0n, max: 2_000_000n }),
+  }),
+  fc.record({
+    kind: fc.constant('snapshot' as const),
+    limit: fc.bigInt({ min: 0n, max: 2_000_000n }),
+    entries: fc.uniqueArray(
+      fc.record({
+        invoice: fc.integer({ min: 0, max: 8 }),
+        booked: fc.bigInt({ min: 1n, max: 300_000n }),
+      }),
+      { selector: (entry) => entry.invoice, maxLength: 6 },
+    ),
   }),
 );
 
@@ -55,18 +76,21 @@ describe('capacity properties (Postgres)', () => {
     await database.destroy();
   });
 
-  it('keeps balances consistent for any sequence of reservations and releases', async () => {
+  it('keeps balances consistent for any sequence of reservations, releases, limit changes and snapshots', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(operationArb, { minLength: 1, maxLength: 25 }),
         async (operations) => {
           run += 1;
           const programId = `PRG-P-${run}`;
-          await createProgram(database.db, programId, USD, 1_000_000n);
+          const stream = { revision: 1 };
+          await services.treasury.execute(
+            inbound(limitSet(`${programId}-1`, programId, 1, '1000000')),
+          );
 
           for (const operation of operations) {
             const before = await programState(database.db, programId);
-            const outcome = await apply(services, database.db, programId, operation);
+            const outcome = await apply(services, database.db, programId, operation, stream);
             const after = await programState(database.db, programId);
 
             if (outcome.status === 'rejected') {
@@ -80,7 +104,6 @@ describe('capacity properties (Postgres)', () => {
             if (outcome.status === 'replayed') {
               expect(after).toEqual(before);
             }
-            expect(after.utilisedMinor <= after.limitMinor).toBe(true);
             await expectInvariants(database.db, programId);
           }
         },
@@ -94,6 +117,7 @@ type Outcome =
   | { status: 'reserved'; bookedMinor: bigint }
   | { status: 'released' }
   | { status: 'replayed' }
+  | { status: 'treasury' }
   | { status: 'rejected'; error: unknown };
 
 async function apply(
@@ -101,7 +125,30 @@ async function apply(
   db: Db,
   programId: string,
   operation: Operation,
+  stream: { revision: number },
 ): Promise<Outcome> {
+  if (operation.kind === 'limit' || operation.kind === 'snapshot') {
+    stream.revision += 1;
+    const messageId = `${programId}-${stream.revision}`;
+    const message =
+      operation.kind === 'limit'
+        ? limitSet(messageId, programId, stream.revision, operation.limit.toString())
+        : snapshot(
+            messageId,
+            programId,
+            stream.revision,
+            operation.limit.toString(),
+            operation.entries.map((entry) => ({
+              invoiceId: `INV-${entry.invoice}`,
+              invoiceAmount: entry.booked.toString(),
+              invoiceCurrency: 'USD',
+              bookedAmount: entry.booked.toString(),
+            })),
+          );
+    const result = await services.treasury.execute(inbound(message));
+    expect(result.outcome).toBe('APPLIED');
+    return { status: 'treasury' };
+  }
   try {
     if (operation.kind === 'reserve') {
       const result = await services.reserve.execute({

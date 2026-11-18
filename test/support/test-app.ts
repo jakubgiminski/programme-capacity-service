@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { Test } from '@nestjs/testing';
 import { type NestExpressApplication } from '@nestjs/platform-express';
+import { Logger } from 'nestjs-pino';
 import { exportSPKI, generateKeyPair, type KeyLike, SignJWT } from 'jose';
 import { AppModule } from '../../src/app.module';
 import { type AppConfig, loadConfig } from '../../src/config/config';
@@ -47,7 +48,11 @@ export async function createTestApp(
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule.register(config)],
   }).compile();
-  const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });
+  const app = moduleRef.createNestApplication<NestExpressApplication>({
+    bodyParser: false,
+    bufferLogs: true,
+  });
+  app.useLogger(app.get(Logger));
   configureApp(app);
   await app.init();
 

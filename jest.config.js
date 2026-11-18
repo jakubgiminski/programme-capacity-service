@@ -22,7 +22,7 @@ module.exports = {
       testMatch: ['**/*.int-spec.ts', '**/*.e2e-spec.ts'],
       globalSetup: '<rootDir>/test/support/global-setup.ts',
       globalTeardown: '<rootDir>/test/support/global-teardown.ts',
-      testTimeout: 60_000,
+      setupFilesAfterEnv: ['<rootDir>/test/support/jest-setup.ts'],
       slowTestThreshold: 30,
     },
   ],
