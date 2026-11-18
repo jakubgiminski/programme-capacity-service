@@ -2,6 +2,7 @@ import fc from 'fast-check';
 import { type FxRate, Money, parseCurrency, parseFxRate } from '../../money';
 import {
   admissionLimitMinor,
+  assertReleasableBy,
   assertReplayableReservation,
   planBooking,
   planRelease,
@@ -14,6 +15,7 @@ import {
   OverReleaseError,
   ReleaseCurrencyMismatchError,
   ReservationAlreadyReleasedError,
+  TreasuryOwnedReservationError,
 } from './errors';
 import { type Program, type Reservation, ZERO_ALLOCATION_BASE } from './model';
 
@@ -125,6 +127,22 @@ describe('admission against a parked treasury limit', () => {
     expect(() => planBooking(current, Money.of(101n, USD), identity, 400n)).toThrow(
       InsufficientCapacityError,
     );
+  });
+});
+
+describe('assertReleasableBy', () => {
+  it('lets treasury release any reservation and the API only its own', () => {
+    const api = reservation({ origin: 'API' });
+    const imported = reservation({ origin: 'TREASURY' });
+
+    expect(() => {
+      assertReleasableBy(api, 'API');
+      assertReleasableBy(api, 'TREASURY');
+      assertReleasableBy(imported, 'TREASURY');
+    }).not.toThrow();
+    expect(() => {
+      assertReleasableBy(imported, 'API');
+    }).toThrow(TreasuryOwnedReservationError);
   });
 });
 

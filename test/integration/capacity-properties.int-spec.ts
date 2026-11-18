@@ -6,6 +6,7 @@ import {
   ReleaseConflictError,
   ReservationAlreadyReleasedError,
   ReservationNotFoundError,
+  TreasuryOwnedReservationError,
 } from '../../src/capacity/domain/errors';
 import { type Db } from '../../src/database/database';
 import { type CurrencyCode } from '../../src/money';
@@ -116,6 +117,9 @@ function expectRelease(
   const reservation = model.reservations.get(invoiceId);
   if (reservation === undefined) {
     return { outcome: 'rejected', error: ReservationNotFoundError };
+  }
+  if (reservation.origin === 'TREASURY') {
+    return { outcome: 'rejected', error: TreasuryOwnedReservationError };
   }
   if (reservation.releases.has(releaseId)) {
     return reservation.releases.get(releaseId) === amount

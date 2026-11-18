@@ -24,6 +24,7 @@ const CAPACITY_STATUS: Record<string, number> = {
   'program-not-found': HttpStatus.NOT_FOUND,
   'reservation-not-found': HttpStatus.NOT_FOUND,
   'invoice-conflict': HttpStatus.CONFLICT,
+  'treasury-owned-reservation': HttpStatus.CONFLICT,
   'insufficient-capacity': HttpStatus.CONFLICT,
   'release-conflict': HttpStatus.CONFLICT,
   'reservation-already-released': HttpStatus.CONFLICT,

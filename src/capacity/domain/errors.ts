@@ -37,6 +37,16 @@ export class InvoiceConflictError extends CapacityError {
   }
 }
 
+export class TreasuryOwnedReservationError extends CapacityError {
+  readonly code = 'treasury-owned-reservation';
+
+  constructor(readonly invoiceId: string) {
+    super(
+      `Invoice ${invoiceId} is tracked from treasury and is released only by treasury messages`,
+    );
+  }
+}
+
 export class InsufficientCapacityError extends CapacityError {
   readonly code = 'insufficient-capacity';
 

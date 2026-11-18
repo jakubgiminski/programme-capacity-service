@@ -600,6 +600,35 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
     expect(await programState(database.db, id)).toEqual(before);
   });
 
+  it('refuses API releases of a treasury invoice so a covered repayment cannot free twice', async () => {
+    const id = nextProgramId();
+    const entry = { invoiceId: 'TRE-1', invoiceAmount: '100', invoiceCurrency: 'USD' };
+    await apply(snapshot(`${id}-1`, id, 1, '100000', [{ ...entry, bookedAmount: '100' }]));
+    await apply(
+      snapshot(`${id}-3`, id, 3, '100000', [
+        { ...entry, outstandingInvoiceAmount: '60', bookedAmount: '60' },
+      ]),
+    );
+    const before = await programState(database.db, id);
+
+    await expect(
+      services.release.execute({
+        programId: id,
+        invoiceId: 'TRE-1',
+        releaseId: 'TR-1',
+        amount: money(40n, USD),
+        actor: testActor,
+      }),
+    ).rejects.toMatchObject({ code: 'treasury-owned-reservation' });
+    const stale = await apply(
+      invoiceRepaid(`${id}-2`, id, 2, 'TRE-1', 'TR-1', { amount: '40', currency: 'USD' }),
+    );
+
+    expect(stale.outcome).toBe('STALE');
+    expect(await programState(database.db, id)).toEqual(before);
+    expect((await services.queries.getCapacity(id)).program.utilisedMinor).toBe(60n);
+  });
+
   it('admits reservations against a lower limit parked behind a gap', async () => {
     const id = nextProgramId();
     await apply(limitSet(`${id}-1`, id, 1, '1000'));

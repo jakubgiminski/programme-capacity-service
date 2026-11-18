@@ -14,9 +14,11 @@ import {
   OverReleaseError,
   ReleaseCurrencyMismatchError,
   ReservationAlreadyReleasedError,
+  TreasuryOwnedReservationError,
 } from './errors';
 import {
   type FxSnapshot,
+  type Origin,
   outstandingInvoiceMinor,
   type Program,
   type Reservation,
@@ -48,6 +50,12 @@ export function assertReplayableReservation(existing: Reservation, invoiceAmount
     existing.invoiceAmountMinor !== invoiceAmount.minor
   ) {
     throw new InvoiceConflictError(existing.invoiceId);
+  }
+}
+
+export function assertReleasableBy(reservation: Reservation, origin: Origin): void {
+  if (origin === 'API' && reservation.origin === 'TREASURY') {
+    throw new TreasuryOwnedReservationError(reservation.invoiceId);
   }
 }
 

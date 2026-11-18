@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { type DbTransaction } from '../../database/database';
 import { type Money } from '../../money';
-import { planRelease } from '../domain/capacity-rules';
+import { assertReleasableBy, planRelease } from '../domain/capacity-rules';
 import { ReleaseConflictError, ReservationNotFoundError } from '../domain/errors';
 import {
   type Origin,
@@ -42,6 +42,7 @@ export class ReleaseProcessor {
     if (reservation === null) {
       throw new ReservationNotFoundError(program.id, command.invoiceId);
     }
+    assertReleasableBy(reservation, command.origin);
 
     const previous = await this.repository.findRelease(trx, reservation.id, command.releaseId);
     if (previous !== null) {
