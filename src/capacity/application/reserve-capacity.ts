@@ -7,11 +7,12 @@ import {
   InvoiceConflictError,
   ProgramNotFoundError,
 } from '../domain/errors';
-import { type Reservation } from '../domain/model';
+import { type Program, type Reservation } from '../domain/model';
 import { CapacityRepository } from '../infrastructure/capacity.repository';
 import { type ReserveCapacityCommand } from './commands';
 
 export interface ReserveCapacityResult {
+  readonly program: Program;
   readonly reservation: Reservation;
   readonly created: boolean;
 }
@@ -36,7 +37,7 @@ export class ReserveCapacity {
         if (!isSameReservationRequest(existing, command.invoiceAmount)) {
           throw new InvoiceConflictError(command.invoiceId);
         }
-        return { reservation: existing, created: false };
+        return { program, reservation: existing, created: false };
       }
 
       const rate = await this.fx.getRate(command.invoiceAmount.currency, program.currency);
@@ -72,7 +73,7 @@ export class ReserveCapacity {
           reason: null,
         },
       ]);
-      return { reservation, created: true };
+      return { program: updated, reservation, created: true };
     });
   }
 }

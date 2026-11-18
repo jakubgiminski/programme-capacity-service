@@ -1,0 +1,20 @@
+export const PROBLEM_CONTENT_TYPE = 'application/problem+json';
+
+export interface Problem {
+  type: string;
+  title: string;
+  status: number;
+  detail?: string;
+  [extension: string]: unknown;
+}
+
+export function problemType(code: string): string {
+  return `/problems/${code}`;
+}
+
+export class RequestValidationError extends Error {
+  constructor(readonly errors: { path: string; message: string }[]) {
+    super('Request validation failed');
+    this.name = 'RequestValidationError';
+  }
+}

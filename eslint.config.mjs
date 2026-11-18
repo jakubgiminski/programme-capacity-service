@@ -23,7 +23,10 @@ export default tseslint.config(
         'error',
         { allowNumber: true, allowBoolean: true },
       ],
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', ignoreRestSiblings: true },
+      ],
       '@typescript-eslint/switch-exhaustiveness-check': 'error',
       '@typescript-eslint/no-unsafe-class-instance-assignment': 'off',
     },
@@ -33,6 +36,8 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/unbound-method': 'off',
       '@typescript-eslint/no-non-null-assertion': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-assignment': 'off',
     },
   },
   prettier,

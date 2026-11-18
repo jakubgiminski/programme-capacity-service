@@ -11,6 +11,7 @@ export interface CapacityView {
 }
 
 export interface ReservationDetails {
+  readonly program: Program;
   readonly reservation: Reservation;
   readonly releases: Release[];
 }
@@ -41,6 +42,6 @@ export class CapacityQueries {
       throw new ReservationNotFoundError(programId, invoiceId);
     }
     const releases = await this.repository.listReleases(this.db, reservation.id);
-    return { reservation, releases };
+    return { program, reservation, releases };
   }
 }

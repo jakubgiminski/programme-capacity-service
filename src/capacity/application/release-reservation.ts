@@ -1,12 +1,13 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DATABASE, type Db } from '../../database/database';
 import { ProgramNotFoundError } from '../domain/errors';
-import { type Release, type Reservation } from '../domain/model';
+import { type Program, type Release, type Reservation } from '../domain/model';
 import { CapacityRepository } from '../infrastructure/capacity.repository';
 import { type ReleaseReservationCommand } from './commands';
 import { ReleaseProcessor } from './release-processor';
 
 export interface ReleaseReservationResult {
+  readonly program: Program;
   readonly reservation: Reservation;
   readonly release: Release;
   readonly created: boolean;
@@ -34,11 +35,7 @@ export class ReleaseReservation {
         actor: command.actor,
         sourceMessageId: null,
       });
-      return {
-        reservation: outcome.reservation,
-        release: outcome.release,
-        created: outcome.created,
-      };
+      return outcome;
     });
   }
 }
