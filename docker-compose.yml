@@ -39,6 +39,7 @@ services:
 
   app:
     build: .
+    command: ['sh', '-c', 'node dist/scripts/migrate.js && node dist/src/main.js']
     environment:
       NODE_ENV: production
       PORT: '3000'
