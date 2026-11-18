@@ -27,8 +27,8 @@ export interface ReservationDetails {
 export class CapacityQueries {
   constructor(
     @Inject(DATABASE) private readonly db: Db,
-    private readonly repository: CapacityRepository,
-    private readonly treasury: TreasuryRepository,
+    @Inject(CapacityRepository) private readonly repository: CapacityRepository,
+    @Inject(TreasuryRepository) private readonly treasury: TreasuryRepository,
   ) {}
 
   async getCapacity(programId: string): Promise<CapacityView> {

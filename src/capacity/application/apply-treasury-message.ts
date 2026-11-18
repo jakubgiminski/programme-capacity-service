@@ -50,9 +50,9 @@ function rejected(reason: string): ApplyResult {
 export class ApplyTreasuryMessage {
   constructor(
     @Inject(DATABASE) private readonly db: Db,
-    private readonly capacity: CapacityRepository,
-    private readonly treasury: TreasuryRepository,
-    private readonly releases: ReleaseProcessor,
+    @Inject(CapacityRepository) private readonly capacity: CapacityRepository,
+    @Inject(TreasuryRepository) private readonly treasury: TreasuryRepository,
+    @Inject(ReleaseProcessor) private readonly releases: ReleaseProcessor,
   ) {}
 
   execute(inbound: InboundTreasuryMessage): Promise<ApplyTreasuryResult> {

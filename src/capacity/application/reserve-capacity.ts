@@ -22,7 +22,7 @@ export class ReserveCapacity {
   constructor(
     @Inject(DATABASE) private readonly db: Db,
     @Inject(FX_RATE_PROVIDER) private readonly fx: FxRateProvider,
-    private readonly repository: CapacityRepository,
+    @Inject(CapacityRepository) private readonly repository: CapacityRepository,
   ) {}
 
   execute(command: ReserveCapacityCommand): Promise<ReserveCapacityResult> {

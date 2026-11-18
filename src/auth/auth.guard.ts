@@ -14,7 +14,7 @@ const BEARER = /^Bearer ([A-Za-z0-9._~+/-]+=*)$/;
 @Injectable()
 export class AuthGuard implements CanActivate {
   constructor(
-    private readonly reflector: Reflector,
+    @Inject(Reflector) private readonly reflector: Reflector,
     @Inject(TOKEN_VERIFIER) private readonly verifier: TokenVerifier,
   ) {}
 

@@ -31,8 +31,8 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(KAFKA) private readonly kafka: Kafka,
     @Inject(KAFKA_HEALTH) private readonly health: KafkaHealth,
-    private readonly applyMessage: ApplyTreasuryMessage,
-    private readonly deadLetters: DeadLetterPublisher,
+    @Inject(ApplyTreasuryMessage) private readonly applyMessage: ApplyTreasuryMessage,
+    @Inject(DeadLetterPublisher) private readonly deadLetters: DeadLetterPublisher,
   ) {
     this.consumer = kafka.consumer({
       groupId: config.KAFKA_GROUP_ID,

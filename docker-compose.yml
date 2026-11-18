@@ -8,11 +8,11 @@ services:
       POSTGRES_PASSWORD: capacity
       POSTGRES_DB: capacity
     ports:
-      - '55432:5432'
+      - '127.0.0.1:55432:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U capacity -d capacity']
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5432 -U capacity -d capacity']
       interval: 2s
       timeout: 3s
       retries: 30
@@ -28,7 +28,7 @@ services:
       - --smp=1
       - --default-log-level=warn
     ports:
-      - '19092:19092'
+      - '127.0.0.1:19092:19092'
     volumes:
       - redpanda-data:/var/lib/redpanda/data
     healthcheck:
@@ -56,7 +56,7 @@ services:
     volumes:
       - dev-keys:/app/.dev-keys
     ports:
-      - '3000:3000'
+      - '127.0.0.1:3000:3000'
     depends_on:
       postgres:
         condition: service_healthy

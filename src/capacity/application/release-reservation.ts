@@ -17,8 +17,8 @@ export interface ReleaseReservationResult {
 export class ReleaseReservation {
   constructor(
     @Inject(DATABASE) private readonly db: Db,
-    private readonly repository: CapacityRepository,
-    private readonly processor: ReleaseProcessor,
+    @Inject(CapacityRepository) private readonly repository: CapacityRepository,
+    @Inject(ReleaseProcessor) private readonly processor: ReleaseProcessor,
   ) {}
 
   execute(command: ReleaseReservationCommand): Promise<ReleaseReservationResult> {

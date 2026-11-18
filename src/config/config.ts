@@ -1,5 +1,13 @@
 import { z } from 'zod';
 
+const brokerSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9.-]+:[0-9]{1,5}$/, { message: 'Broker must be host:port' })
+  .refine((broker) => {
+    const port = Number(broker.slice(broker.lastIndexOf(':') + 1));
+    return port >= 1 && port <= 65535;
+  }, 'Broker port must be between 1 and 65535');
+
 const csv = z
   .string()
   .transform((value) =>
@@ -8,7 +16,11 @@ const csv = z
       .map((item) => item.trim())
       .filter((item) => item.length > 0),
   )
-  .pipe(z.array(z.string().min(1)).min(1));
+  .pipe(z.array(brokerSchema).min(1));
+
+const databaseUrlSchema = z
+  .url({ protocol: /^postgres(ql)?$/ })
+  .refine((value) => new URL(value).hostname.length > 0, 'DATABASE_URL must include a host');
 
 const booleanFlag = z.enum(['true', 'false']).transform((value) => value === 'true');
 
@@ -16,7 +28,7 @@ const baseSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
-  DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
+  DATABASE_URL: databaseUrlSchema,
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
   KAFKA_ENABLED: booleanFlag.default(true),
   KAFKA_BROKERS: csv.default(['localhost:19092']),
@@ -37,6 +49,17 @@ const baseSchema = z.object({
 
 export const configSchema = baseSchema.superRefine((config, context) => {
   const keySources = [config.JWT_PUBLIC_KEY, config.JWT_PUBLIC_KEY_FILE, config.JWT_JWKS_URL];
+  if (
+    config.NODE_ENV === 'production' &&
+    config.JWT_JWKS_URL !== undefined &&
+    !config.JWT_JWKS_URL.startsWith('https://')
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['JWT_JWKS_URL'],
+      message: 'JWT_JWKS_URL must use https in production',
+    });
+  }
   if (keySources.filter((source) => source !== undefined).length !== 1) {
     context.addIssue({
       code: 'custom',

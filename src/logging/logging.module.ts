@@ -28,6 +28,7 @@ export class LoggingModule {
             level: config.LOG_LEVEL,
             genReqId: resolveCorrelationId,
             customAttributeKeys: { reqId: 'correlationId' },
+            quietReqLogger: true,
             redact: ['req.headers.authorization', 'req.headers.cookie'],
             autoLogging: { ignore: (req) => req.url === '/health' },
           },

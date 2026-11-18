@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { type DbTransaction } from '../../database/database';
 import { type Money } from '../../money';
 import { planRelease } from '../domain/capacity-rules';
@@ -25,7 +25,7 @@ export interface ReleaseOutcome {
 
 @Injectable()
 export class ReleaseProcessor {
-  constructor(private readonly repository: CapacityRepository) {}
+  constructor(@Inject(CapacityRepository) private readonly repository: CapacityRepository) {}
 
   async releaseLocked(
     trx: DbTransaction,

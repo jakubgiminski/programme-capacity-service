@@ -64,6 +64,29 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...baseEnv, JWT_AUDIENCE: '' })).toThrow(/JWT_AUDIENCE/);
   });
 
+  it('rejects database urls without a host and brokers without a valid port', () => {
+    expect(() =>
+      loadConfig({ ...baseEnv, DATABASE_URL: 'postgres:db.internal:5432/capacity' }),
+    ).toThrow(/DATABASE_URL/);
+    expect(() => loadConfig({ ...baseEnv, KAFKA_BROKERS: 'broker:no-port' })).toThrow(
+      /KAFKA_BROKERS/,
+    );
+    expect(() => loadConfig({ ...baseEnv, KAFKA_BROKERS: 'broker' })).toThrow(/KAFKA_BROKERS/);
+    expect(() => loadConfig({ ...baseEnv, KAFKA_BROKERS: 'broker:70000' })).toThrow(
+      /KAFKA_BROKERS/,
+    );
+  });
+
+  it('requires an https JWKS url in production', () => {
+    const { JWT_PUBLIC_KEY_FILE, ...withoutKey } = baseEnv;
+    const jwks = { ...withoutKey, JWT_JWKS_URL: 'http://issuer.test/jwks' };
+
+    expect(() => loadConfig({ ...jwks, NODE_ENV: 'production' })).toThrow(/https/);
+    expect(loadConfig({ ...jwks, NODE_ENV: 'development' }).JWT_JWKS_URL).toBe(
+      'http://issuer.test/jwks',
+    );
+  });
+
   it('rejects an empty broker list', () => {
     expect(() => loadConfig({ ...baseEnv, KAFKA_BROKERS: ' , ' })).toThrow(/KAFKA_BROKERS/);
   });

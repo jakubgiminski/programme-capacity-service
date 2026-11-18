@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpStatus, Param, Post, Res } from '@nestjs/common';
+import { Body, Controller, Get, HttpStatus, Inject, Param, Post, Res } from '@nestjs/common';
 import { type Response } from 'express';
 import { Scope } from '../../auth/principal';
 import { RequireScope } from '../../auth/require-scope.decorator';
@@ -28,9 +28,9 @@ const idPipe = new ZodValidationPipe(identifierSchema);
 @Controller('v1/programs/:programId')
 export class CapacityController {
   constructor(
-    private readonly reserveCapacity: ReserveCapacity,
-    private readonly releaseReservation: ReleaseReservation,
-    private readonly queries: CapacityQueries,
+    @Inject(ReserveCapacity) private readonly reserveCapacity: ReserveCapacity,
+    @Inject(ReleaseReservation) private readonly releaseReservation: ReleaseReservation,
+    @Inject(CapacityQueries) private readonly queries: CapacityQueries,
   ) {}
 
   @Get('capacity')
