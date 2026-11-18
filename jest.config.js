@@ -1,9 +1,14 @@
 const fs = require('node:fs');
 
 const swc = JSON.parse(fs.readFileSync(`${__dirname}/.swcrc`, 'utf8'));
-const transform = { '^.+\\.ts$': ['@swc/jest', { ...swc, swcrc: false }] };
+const transform = {
+  '^.+\\.ts$': ['@swc/jest', { ...swc, sourceMaps: 'inline', swcrc: false }],
+};
 
 module.exports = {
+  coverageProvider: 'v8',
+  collectCoverageFrom: ['src/**/*.ts', '!src/**/*.spec.ts', '!src/database/migrations/**'],
+  coverageReporters: ['text-summary', 'html'],
   projects: [
     {
       displayName: 'unit',

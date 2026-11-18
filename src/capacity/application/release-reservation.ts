@@ -1,17 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DATABASE, type Db } from '../../database/database';
 import { ProgramNotFoundError } from '../domain/errors';
-import { type Program, type Release, type Reservation } from '../domain/model';
 import { CapacityRepository } from '../infrastructure/capacity.repository';
 import { type ReleaseReservationCommand } from './commands';
-import { ReleaseProcessor } from './release-processor';
-
-export interface ReleaseReservationResult {
-  readonly program: Program;
-  readonly reservation: Reservation;
-  readonly release: Release;
-  readonly created: boolean;
-}
+import { ReleaseProcessor, type ReleaseOutcome } from './release-processor';
 
 @Injectable()
 export class ReleaseReservation {
@@ -21,13 +13,13 @@ export class ReleaseReservation {
     @Inject(ReleaseProcessor) private readonly processor: ReleaseProcessor,
   ) {}
 
-  execute(command: ReleaseReservationCommand): Promise<ReleaseReservationResult> {
+  execute(command: ReleaseReservationCommand): Promise<ReleaseOutcome> {
     return this.db.transaction().execute(async (trx) => {
       const program = await this.repository.lockProgram(trx, command.programId);
       if (program === null) {
         throw new ProgramNotFoundError(command.programId);
       }
-      const outcome = await this.processor.releaseLocked(trx, program, {
+      return this.processor.releaseLocked(trx, program, {
         invoiceId: command.invoiceId,
         releaseId: command.releaseId,
         amount: command.amount,
@@ -35,7 +27,6 @@ export class ReleaseReservation {
         actor: command.actor,
         sourceMessageId: null,
       });
-      return outcome;
     });
   }
 }
