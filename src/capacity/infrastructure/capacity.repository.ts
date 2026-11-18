@@ -1,6 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { type Kysely, sql } from 'kysely';
-import { type Database, type NewLedgerEntry } from '../../database/database.types';
+import {
+  type Database,
+  type NewLedgerEntry,
+  type ProgramRow,
+  type ReleaseRow,
+  type ReservationRow,
+} from '../../database/database.types';
 import { type CurrencyCode, parseCurrency } from '../../money';
 import {
   type AllocationBase,
@@ -23,9 +29,11 @@ export interface NewProgram {
 export interface NewReservation {
   programId: string;
   invoiceId: string;
+  status: Exclude<ReservationStatus, 'RELEASED'>;
   origin: Origin;
   invoiceAmountMinor: bigint;
   invoiceCurrency: CurrencyCode;
+  invoiceReleasedMinor: bigint;
   bookedMinor: bigint;
   fx: FxSnapshot | null;
 }
@@ -35,7 +43,11 @@ export interface ReservationBalances {
   invoiceReleasedMinor: bigint;
   bookedMinor: bigint;
   releasedMinor: bigint;
-  allocationBase?: AllocationBase;
+}
+
+export interface ReservationRebook extends ReservationBalances {
+  id: string;
+  allocationBase: AllocationBase;
 }
 
 export interface NewRelease {
@@ -69,55 +81,7 @@ const programColumns = [
   'updated_at',
 ] as const;
 
-interface ProgramRecord {
-  id: string;
-  currency: string;
-  limit_minor: bigint;
-  utilised_minor: bigint;
-  version: bigint;
-  created_at: Date;
-  updated_at: Date;
-}
-
-interface ReservationRecord {
-  id: string;
-  program_id: string;
-  invoice_id: string;
-  status: ReservationStatus;
-  origin: Origin;
-  invoice_amount_minor: bigint;
-  invoice_currency: string;
-  invoice_released_minor: bigint;
-  booked_minor: bigint;
-  released_minor: bigint;
-  allocation_base_invoice_minor: bigint;
-  allocation_base_released_minor: bigint;
-  fx_rate: bigint | null;
-  fx_scale: number | null;
-  fx_source: string | null;
-  fx_as_of: Date | null;
-  created_at: Date;
-  updated_at: Date;
-}
-
-interface ReleaseRecord {
-  id: string;
-  reservation_id: string;
-  release_id: string;
-  requested_invoice_amount_minor: bigint | null;
-  invoice_amount_minor: bigint;
-  freed_minor: bigint;
-  origin: Origin;
-  actor: string;
-  sequence: bigint;
-  status_after: ReservationStatus;
-  invoice_released_after_minor: bigint;
-  booked_after_minor: bigint;
-  released_after_minor: bigint;
-  created_at: Date;
-}
-
-function toProgram(row: ProgramRecord): Program {
+function toProgram(row: ProgramRow): Program {
   return {
     id: row.id,
     currency: parseCurrency(row.currency),
@@ -129,7 +93,7 @@ function toProgram(row: ProgramRecord): Program {
   };
 }
 
-function toFxSnapshot(row: ReservationRecord): FxSnapshot | null {
+function toFxSnapshot(row: ReservationRow): FxSnapshot | null {
   if (
     row.fx_rate === null ||
     row.fx_scale === null ||
@@ -146,7 +110,7 @@ function toFxSnapshot(row: ReservationRecord): FxSnapshot | null {
   };
 }
 
-function toReservation(row: ReservationRecord): Reservation {
+function toReservation(row: ReservationRow): Reservation {
   return {
     id: row.id,
     programId: row.program_id,
@@ -168,7 +132,7 @@ function toReservation(row: ReservationRecord): Reservation {
   };
 }
 
-function toRelease(row: ReleaseRecord): Release {
+function toRelease(row: ReleaseRow): Release {
   return {
     id: row.id,
     reservationId: row.reservation_id,
@@ -201,10 +165,12 @@ function reservationValues(reservation: NewReservation) {
   return {
     program_id: reservation.programId,
     invoice_id: reservation.invoiceId,
-    status: 'ACTIVE' as const,
+    status: reservation.status,
     origin: reservation.origin,
     invoice_amount_minor: reservation.invoiceAmountMinor,
     invoice_currency: reservation.invoiceCurrency,
+    invoice_released_minor: reservation.invoiceReleasedMinor,
+    allocation_base_invoice_minor: reservation.invoiceReleasedMinor,
     booked_minor: reservation.bookedMinor,
     fx_rate: reservation.fx?.rateScaled ?? null,
     fx_scale: reservation.fx?.scale ?? null,
@@ -277,17 +243,6 @@ export class CapacityRepository {
     return row === undefined ? null : toReservation(row);
   }
 
-  async listOpenReservations(db: Executor, programId: string): Promise<Reservation[]> {
-    const rows = await db
-      .selectFrom('reservations')
-      .selectAll()
-      .where('program_id', '=', programId)
-      .where('status', '<>', 'RELEASED')
-      .orderBy('invoice_id')
-      .execute();
-    return rows.map(toReservation);
-  }
-
   async listReservationsForReconciliation(
     db: Executor,
     programId: string,
@@ -330,18 +285,49 @@ export class CapacityRepository {
         invoice_released_minor: balances.invoiceReleasedMinor,
         booked_minor: balances.bookedMinor,
         released_minor: balances.releasedMinor,
-        ...(balances.allocationBase === undefined
-          ? {}
-          : {
-              allocation_base_invoice_minor: balances.allocationBase.invoiceReleasedMinor,
-              allocation_base_released_minor: balances.allocationBase.releasedMinor,
-            }),
         updated_at: updatedAt,
       })
       .where('id', '=', reservationId)
       .returningAll()
       .executeTakeFirstOrThrow();
     return toReservation(row);
+  }
+
+  async rebookReservations(db: Executor, rebooks: readonly ReservationRebook[]): Promise<void> {
+    if (rebooks.length === 0) {
+      return;
+    }
+    const column = <T>(read: (rebook: ReservationRebook) => T) => rebooks.map(read);
+    const minor = (read: (rebook: ReservationRebook) => bigint) =>
+      rebooks.map((rebook) => read(rebook).toString());
+    await sql`
+      UPDATE reservations AS r SET
+        status = v.status,
+        invoice_released_minor = v.invoice_released_minor,
+        booked_minor = v.booked_minor,
+        released_minor = v.released_minor,
+        allocation_base_invoice_minor = v.allocation_base_invoice_minor,
+        allocation_base_released_minor = v.allocation_base_released_minor,
+        updated_at = now()
+      FROM unnest(
+        ${column((rebook) => rebook.id)}::uuid[],
+        ${column((rebook) => rebook.status)}::text[],
+        ${minor((rebook) => rebook.invoiceReleasedMinor)}::bigint[],
+        ${minor((rebook) => rebook.bookedMinor)}::bigint[],
+        ${minor((rebook) => rebook.releasedMinor)}::bigint[],
+        ${minor((rebook) => rebook.allocationBase.invoiceReleasedMinor)}::bigint[],
+        ${minor((rebook) => rebook.allocationBase.releasedMinor)}::bigint[]
+      ) AS v(
+        id,
+        status,
+        invoice_released_minor,
+        booked_minor,
+        released_minor,
+        allocation_base_invoice_minor,
+        allocation_base_released_minor
+      )
+      WHERE r.id = v.id
+    `.execute(db);
   }
 
   async findRelease(

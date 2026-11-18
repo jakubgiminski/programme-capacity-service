@@ -1,13 +1,7 @@
 import { type CurrencyCode, formatFxRate, type MoneyJson } from '../../money';
 import { type CapacityView } from '../application/capacity-queries';
 import { type OpenDiscrepancy } from '../infrastructure/treasury.repository';
-import {
-  availableMinor,
-  outstandingMinor,
-  type Program,
-  type Release,
-  type Reservation,
-} from '../domain/model';
+import { outstandingMinor, type Program, type Release, type Reservation } from '../domain/model';
 
 function money(minor: bigint, currency: CurrencyCode): MoneyJson {
   return { amount: minor.toString(), currency };
@@ -20,9 +14,18 @@ export function presentCapacity(view: CapacityView) {
     currency: program.currency,
     limit: money(program.limitMinor, program.currency),
     utilised: money(program.utilisedMinor, program.currency),
-    available: money(availableMinor(program), program.currency),
+    available: money(view.availableMinor, program.currency),
     overUtilised: view.overUtilised,
     openDiscrepancies: view.openDiscrepancies,
+    treasury: {
+      revision: view.treasury.revision.toString(),
+      parkedMessages: view.treasury.parkedMessages,
+      oldestParkedAt: view.treasury.oldestParkedAt?.toISOString() ?? null,
+      pendingLimit:
+        view.treasury.pendingLimitMinor === null
+          ? null
+          : money(view.treasury.pendingLimitMinor, program.currency),
+    },
     version: program.version.toString(),
     updatedAt: program.updatedAt.toISOString(),
   };

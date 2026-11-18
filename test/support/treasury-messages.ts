@@ -7,6 +7,7 @@ export interface SnapshotEntry {
   invoiceId: string;
   invoiceAmount: string;
   invoiceCurrency: string;
+  outstandingInvoiceAmount?: string;
   bookedAmount: string;
 }
 
@@ -65,7 +66,10 @@ export function snapshot(
     asOf: '2026-11-18T09:59:00Z',
     currency,
     limit,
-    reservations,
+    reservations: reservations.map((entry) => ({
+      ...entry,
+      outstandingInvoiceAmount: entry.outstandingInvoiceAmount ?? entry.invoiceAmount,
+    })),
   };
 }
 

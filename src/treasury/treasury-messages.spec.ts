@@ -11,6 +11,27 @@ function raw(value: object): string {
   return JSON.stringify(value);
 }
 
+function snapshotEntry(overrides: Record<string, unknown> = {}): object {
+  return {
+    invoiceId: 'A',
+    invoiceAmount: '10',
+    invoiceCurrency: 'USD',
+    outstandingInvoiceAmount: '10',
+    bookedAmount: '10',
+    ...overrides,
+  };
+}
+
+function snapshotBody(...reservations: object[]) {
+  return {
+    type: 'ProgramSnapshot',
+    currency: 'USD',
+    limit: '100',
+    asOf: '2026-11-18T09:00:00Z',
+    reservations,
+  };
+}
+
 describe('parseTreasuryMessage', () => {
   it('parses a ProgramLimitSet message with amounts as bigint', () => {
     const parsed = parseTreasuryMessage(
@@ -95,6 +116,22 @@ describe('parseTreasuryMessage', () => {
     expect(parsed).toMatchObject({ kind: 'readable', error: null });
   });
 
+  it('parses a snapshot entry with its outstanding invoice amount', () => {
+    const parsed = parseTreasuryMessage(
+      raw({
+        ...envelope,
+        ...snapshotBody(snapshotEntry({ outstandingInvoiceAmount: '4', bookedAmount: '0' })),
+      }),
+    );
+
+    expect(parsed).toMatchObject({
+      kind: 'readable',
+      message: {
+        reservations: [{ invoiceAmount: 10n, outstandingInvoiceAmount: 4n, bookedAmount: 0n }],
+      },
+    });
+  });
+
   it.each([
     ['not json', '{'],
     ['an array', '[]'],
@@ -113,30 +150,22 @@ describe('parseTreasuryMessage', () => {
     ['a numeric limit', { type: 'ProgramLimitSet', currency: 'USD', limit: 100 }],
     ['an unknown currency', { type: 'ProgramLimitSet', currency: 'ABC', limit: '1' }],
     ['a repayment without releaseId', { type: 'InvoiceRepaid', invoiceId: 'INV-1' }],
-    [
-      'a snapshot with duplicate invoices',
-      {
-        type: 'ProgramSnapshot',
-        currency: 'USD',
-        limit: '100',
-        asOf: '2026-11-18T09:00:00Z',
-        reservations: [
-          { invoiceId: 'A', invoiceAmount: '1', invoiceCurrency: 'USD', bookedAmount: '1' },
-          { invoiceId: 'A', invoiceAmount: '2', invoiceCurrency: 'USD', bookedAmount: '2' },
-        ],
-      },
-    ],
+    ['a snapshot with duplicate invoices', snapshotBody(snapshotEntry(), snapshotEntry())],
     [
       'a snapshot with a negative booked amount',
-      {
-        type: 'ProgramSnapshot',
-        currency: 'USD',
-        limit: '100',
-        asOf: '2026-11-18T09:00:00Z',
-        reservations: [
-          { invoiceId: 'A', invoiceAmount: '1', invoiceCurrency: 'USD', bookedAmount: '-1' },
-        ],
-      },
+      snapshotBody(snapshotEntry({ bookedAmount: '-1' })),
+    ],
+    [
+      'a snapshot without an outstanding invoice amount',
+      snapshotBody(snapshotEntry({ outstandingInvoiceAmount: undefined })),
+    ],
+    [
+      'a snapshot with a zero outstanding invoice amount',
+      snapshotBody(snapshotEntry({ outstandingInvoiceAmount: '0' })),
+    ],
+    [
+      'a snapshot with more outstanding than the invoice amount',
+      snapshotBody(snapshotEntry({ outstandingInvoiceAmount: '11' })),
     ],
   ])('keeps the envelope but reports %s as an invalid body', (_label, body) => {
     const parsed = parseTreasuryMessage(raw({ ...envelope, ...body }));

@@ -61,10 +61,6 @@ export interface Release {
   readonly createdAt: Date;
 }
 
-export function availableMinor(program: Program): bigint {
-  return program.limitMinor - program.utilisedMinor;
-}
-
 export function outstandingMinor(reservation: Reservation): bigint {
   return reservation.bookedMinor - reservation.releasedMinor;
 }

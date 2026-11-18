@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { type Kysely, sql } from 'kysely';
 import { type Database, type MessageOutcome } from '../../database/database.types';
+import { type CurrencyCode } from '../../money';
+import { type Program } from '../domain/model';
 import { type Discrepancy, type DiscrepancyKind } from '../domain/reconciliation';
 
 type Executor = Kysely<Database>;
@@ -11,14 +13,32 @@ export interface MessageSource {
   readonly offset: string;
 }
 
+export interface StreamPosition {
+  readonly revision: bigint;
+  readonly snapshotAsOf: Date | null;
+}
+
+export interface StreamStatus {
+  readonly revision: bigint;
+  readonly parkedMessages: number;
+  readonly oldestParkedAt: Date | null;
+  readonly pendingLimitMinor: bigint | null;
+}
+
 export interface ProcessedMessage {
   readonly messageId: string;
   readonly programId: string;
   readonly revision: bigint;
   readonly type: string;
+  readonly fingerprint: Buffer;
   readonly outcome: MessageOutcome;
   readonly reason: string | null;
   readonly source: MessageSource;
+}
+
+export interface PendingLimit {
+  readonly limitMinor: bigint;
+  readonly currency: CurrencyCode;
 }
 
 export interface PendingMessage {
@@ -30,13 +50,17 @@ export interface PendingMessage {
   readonly source: MessageSource;
 }
 
+export interface NewPendingMessage extends PendingMessage {
+  readonly limit: PendingLimit | null;
+}
+
 export interface DeadLetter {
   readonly messageId: string | null;
   readonly programId: string | null;
   readonly revision: bigint | null;
   readonly reason: string;
   readonly key: Buffer | null;
-  readonly payload: Buffer;
+  readonly payload: Buffer | null;
   readonly source: MessageSource;
 }
 
@@ -66,7 +90,7 @@ export function storableText(text: string): string {
 
 @Injectable()
 export class TreasuryRepository {
-  async lockStream(db: Executor, programId: string): Promise<bigint> {
+  async lockStream(db: Executor, programId: string): Promise<StreamPosition> {
     await db
       .insertInto('treasury_streams')
       .values({ program_id: programId })
@@ -74,28 +98,66 @@ export class TreasuryRepository {
       .execute();
     const row = await db
       .selectFrom('treasury_streams')
-      .select('revision')
+      .select(['revision', 'snapshot_as_of'])
       .where('program_id', '=', programId)
       .forUpdate()
       .executeTakeFirstOrThrow();
-    return row.revision;
+    return { revision: row.revision, snapshotAsOf: row.snapshot_as_of };
   }
 
-  async setStreamRevision(db: Executor, programId: string, revision: bigint): Promise<void> {
+  async setStreamRevision(
+    db: Executor,
+    programId: string,
+    revision: bigint,
+    snapshotAsOf?: Date,
+  ): Promise<void> {
     await db
       .updateTable('treasury_streams')
-      .set({ revision, updated_at: new Date() })
+      .set({
+        revision,
+        ...(snapshotAsOf === undefined ? {} : { snapshot_as_of: snapshotAsOf }),
+        updated_at: new Date(),
+      })
       .where('program_id', '=', programId)
       .execute();
   }
 
-  async isProcessed(db: Executor, messageId: string): Promise<boolean> {
+  async streamStatus(db: Executor, program: Program): Promise<StreamStatus> {
+    const stream = await db
+      .selectFrom('treasury_streams')
+      .select('revision')
+      .where('program_id', '=', program.id)
+      .executeTakeFirst();
+    const parked = await db
+      .selectFrom('pending_treasury_messages')
+      .select((eb) => [eb.fn.countAll<bigint>().as('count'), eb.fn.min('received_at').as('oldest')])
+      .where('program_id', '=', program.id)
+      .executeTakeFirstOrThrow();
+    return {
+      revision: stream?.revision ?? 0n,
+      parkedMessages: Number(parked.count),
+      oldestParkedAt: parked.oldest,
+      pendingLimitMinor: await this.lowestPendingLimit(db, program),
+    };
+  }
+
+  async lowestPendingLimit(db: Executor, program: Program): Promise<bigint | null> {
+    const row = await db
+      .selectFrom('pending_treasury_messages')
+      .select((eb) => eb.fn.min('limit_minor').as('limit'))
+      .where('program_id', '=', program.id)
+      .where('limit_currency', '=', program.currency)
+      .executeTakeFirstOrThrow();
+    return row.limit;
+  }
+
+  async findFingerprint(db: Executor, messageId: string): Promise<Buffer | null> {
     const row = await db
       .selectFrom('processed_messages')
-      .select('message_id')
+      .select('fingerprint')
       .where('message_id', '=', messageId)
       .executeTakeFirst();
-    return row !== undefined;
+    return row?.fingerprint ?? null;
   }
 
   async recordProcessed(db: Executor, message: ProcessedMessage): Promise<void> {
@@ -106,6 +168,7 @@ export class TreasuryRepository {
         program_id: message.programId,
         revision: message.revision,
         type: message.type,
+        fingerprint: message.fingerprint,
         outcome: message.outcome,
         reason: message.reason === null ? null : storableText(message.reason),
         source_topic: message.source.topic,
@@ -132,7 +195,7 @@ export class TreasuryRepository {
       .execute();
   }
 
-  async park(db: Executor, message: PendingMessage): Promise<boolean> {
+  async park(db: Executor, message: NewPendingMessage): Promise<boolean> {
     const result = await db
       .insertInto('pending_treasury_messages')
       .values({
@@ -141,6 +204,8 @@ export class TreasuryRepository {
         revision: message.revision,
         raw_value: message.rawValue,
         rejected: message.rejected,
+        limit_minor: message.limit?.limitMinor ?? null,
+        limit_currency: message.limit?.currency ?? null,
         source_topic: message.source.topic,
         source_partition: message.source.partition,
         source_offset: message.source.offset,
@@ -229,36 +294,39 @@ export class TreasuryRepository {
     snapshot: SnapshotReference,
   ): Promise<void> {
     const now = new Date();
-    for (const discrepancy of discrepancies) {
-      const values = {
-        local_status: discrepancy.localStatus,
-        local_outstanding_minor: discrepancy.localOutstandingMinor,
-        treasury_outstanding_minor: discrepancy.treasuryOutstandingMinor,
-        detail: discrepancy.detail,
-        snapshot_message_id: snapshot.messageId,
-        snapshot_revision: snapshot.revision,
-        last_seen_at: now,
-      };
-      const updated = await db
-        .updateTable('reconciliation_discrepancies')
-        .set(values)
-        .where('program_id', '=', programId)
-        .where('invoice_id', '=', discrepancy.invoiceId)
-        .where('kind', '=', discrepancy.kind)
-        .where('resolved_at', 'is', null)
-        .executeTakeFirst();
-      if (updated.numUpdatedRows > 0n) {
-        continue;
-      }
-      await db
-        .insertInto('reconciliation_discrepancies')
-        .values({
-          ...values,
-          program_id: programId,
-          invoice_id: discrepancy.invoiceId,
-          kind: discrepancy.kind,
-        })
-        .execute();
+    if (discrepancies.length > 0) {
+      const column = <T>(read: (discrepancy: Discrepancy) => T) => discrepancies.map(read);
+      await sql`
+        INSERT INTO reconciliation_discrepancies (
+          program_id, invoice_id, kind, local_status, local_outstanding_minor,
+          treasury_outstanding_minor, detail, snapshot_message_id, snapshot_revision,
+          detected_at, last_seen_at
+        )
+        SELECT
+          ${programId}, v.invoice_id, v.kind, v.local_status, v.local_outstanding_minor,
+          v.treasury_outstanding_minor, v.detail, ${snapshot.messageId}, ${snapshot.revision},
+          ${now}, ${now}
+        FROM unnest(
+          ${column((item) => item.invoiceId)}::text[],
+          ${column((item) => item.kind)}::text[],
+          ${column((item) => item.localStatus)}::text[],
+          ${column((item) => item.localOutstandingMinor.toString())}::bigint[],
+          ${column((item) => item.treasuryOutstandingMinor?.toString() ?? null)}::bigint[],
+          ${column((item) => storableText(item.detail))}::text[]
+        ) AS v(
+          invoice_id, kind, local_status, local_outstanding_minor,
+          treasury_outstanding_minor, detail
+        )
+        ON CONFLICT (program_id, invoice_id, kind) WHERE resolved_at IS NULL
+        DO UPDATE SET
+          local_status = excluded.local_status,
+          local_outstanding_minor = excluded.local_outstanding_minor,
+          treasury_outstanding_minor = excluded.treasury_outstanding_minor,
+          detail = excluded.detail,
+          snapshot_message_id = excluded.snapshot_message_id,
+          snapshot_revision = excluded.snapshot_revision,
+          last_seen_at = excluded.last_seen_at
+      `.execute(db);
     }
     await db
       .updateTable('reconciliation_discrepancies')

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { DATABASE, type Db, type DbTransaction } from '../../database/database';
 import { type NewLedgerEntry } from '../../database/database.types';
@@ -9,21 +10,31 @@ import {
   type ProgramLimitSet,
   type ProgramSnapshot,
   TreasuryMessageType,
-  type TreasuryEnvelope,
 } from '../../treasury/treasury-messages';
 import { CapacityError } from '../domain/errors';
 import { type Program } from '../domain/model';
-import { decideOrdering } from '../domain/ordering';
+import { decideOrdering, type MessageClass } from '../domain/ordering';
 import {
   planReconciliation,
   type ReconciliationChange,
   type ReconciliationPlan,
 } from '../domain/reconciliation';
-import { CapacityRepository, type NewReservation } from '../infrastructure/capacity.repository';
-import { type MessageSource, TreasuryRepository } from '../infrastructure/treasury.repository';
+import {
+  CapacityRepository,
+  type NewReservation,
+  type ReservationRebook,
+} from '../infrastructure/capacity.repository';
+import {
+  type MessageSource,
+  type PendingLimit,
+  type StreamPosition,
+  TreasuryRepository,
+} from '../infrastructure/treasury.repository';
 import { ReleaseProcessor } from './release-processor';
 
 export const TREASURY_ACTOR = 'treasury';
+
+const DRAIN_BATCH = 100;
 
 export type ReadableTreasuryMessage = Extract<ParsedTreasuryMessage, { kind: 'readable' }>;
 
@@ -42,14 +53,15 @@ export interface ApplyTreasuryResult {
   readonly deadLettered: number;
 }
 
+type Received = Omit<ApplyTreasuryResult, 'drained'>;
+
 type ApplyResult = { applied: true } | { applied: false; reason: string };
 
 type HandleResult = ApplyResult & { deadLettered: number };
 
-interface Candidate {
-  readonly parsed: ReadableTreasuryMessage;
-  readonly rawValue: string;
-  readonly source: MessageSource;
+interface DrainResult {
+  readonly drained: number;
+  readonly deadLettered: number;
 }
 
 const APPLIED: ApplyResult = { applied: true };
@@ -67,83 +79,95 @@ export class ApplyTreasuryMessage {
     @Inject(ReleaseProcessor) private readonly releases: ReleaseProcessor,
   ) {}
 
-  execute(inbound: InboundTreasuryMessage): Promise<ApplyTreasuryResult> {
+  async execute(inbound: InboundTreasuryMessage): Promise<ApplyTreasuryResult> {
+    const received = await this.db.transaction().execute((trx) => this.receive(trx, inbound));
+    const drain = await this.drain(inbound.parsed.envelope.programId);
+    return {
+      ...received,
+      drained: drain.drained,
+      deadLettered: received.deadLettered + drain.deadLettered,
+    };
+  }
+
+  private async receive(trx: DbTransaction, inbound: InboundTreasuryMessage): Promise<Received> {
     const { envelope } = inbound.parsed;
-    return this.db.transaction().execute(async (trx) => {
-      const current = await this.treasury.lockStream(trx, envelope.programId);
-      if (await this.treasury.isProcessed(trx, envelope.messageId)) {
-        return { outcome: 'DUPLICATE', reason: null, drained: 0, deadLettered: 0 };
-      }
+    const stream = await this.treasury.lockStream(trx, envelope.programId);
+    const fingerprint = fingerprintOf(inbound.rawValue);
+    const known = await this.treasury.findFingerprint(trx, envelope.messageId);
+    if (known?.equals(fingerprint) === true) {
+      return { outcome: 'DUPLICATE', reason: null, deadLettered: 0 };
+    }
+    if (known !== null) {
+      const reason = `Message ID ${envelope.messageId} was already used for a different message`;
+      const deadLettered = await this.deadLetter(trx, inbound, reason);
+      return { outcome: 'REJECTED', reason, deadLettered };
+    }
 
-      const revision = BigInt(envelope.revision);
-      const isValidSnapshot = inbound.parsed.message?.type === TreasuryMessageType.ProgramSnapshot;
-      const decision = decideOrdering(current, revision, isValidSnapshot);
+    const revision = BigInt(envelope.revision);
+    const decision = decideOrdering(stream.revision, revision, classify(inbound.parsed));
+    if (decision === 'STALE') {
+      const reason = `Revision ${revision} is not newer than applied revision ${stream.revision}`;
+      await this.treasury.recordProcessed(trx, processed(inbound, fingerprint, 'STALE', reason));
+      return { outcome: 'STALE', reason, deadLettered: 0 };
+    }
+    if (decision === 'PARK') {
+      return this.park(trx, inbound, stream, fingerprint);
+    }
 
-      if (decision === 'STALE') {
-        const reason = `Revision ${revision} is not newer than applied revision ${current}`;
-        await this.treasury.recordProcessed(trx, processed(inbound, 'STALE', reason));
-        return { outcome: 'STALE', reason, drained: 0, deadLettered: 0 };
-      }
-
-      if (decision === 'PARK') {
-        return this.park(trx, inbound, current);
-      }
-
-      await this.treasury.recordProcessed(trx, processed(inbound, 'APPLIED', null));
-      const result = await this.handle(trx, current, {
-        parsed: inbound.parsed,
-        rawValue: inbound.rawValue,
-        source: inbound.source,
-      });
-      const drain = await this.drain(trx, envelope.programId);
-      return {
-        outcome: result.applied ? 'APPLIED' : 'REJECTED',
-        reason: result.applied ? null : result.reason,
-        drained: drain.drained,
-        deadLettered: result.deadLettered + drain.deadLettered,
-      };
-    });
+    await this.treasury.recordProcessed(trx, processed(inbound, fingerprint, 'APPLIED', null));
+    const result = await this.handle(trx, stream, inbound);
+    return {
+      outcome: result.applied ? 'APPLIED' : 'REJECTED',
+      reason: result.applied ? null : result.reason,
+      deadLettered: result.deadLettered,
+    };
   }
 
   private async park(
     trx: DbTransaction,
     inbound: InboundTreasuryMessage,
-    current: bigint,
-  ): Promise<ApplyTreasuryResult> {
-    const { envelope } = inbound.parsed;
-    const reason = `Waiting for revision ${current + 1n}`;
-    await this.treasury.recordProcessed(trx, processed(inbound, 'PARKED', reason));
+    stream: StreamPosition,
+    fingerprint: Buffer,
+  ): Promise<Received> {
+    const { envelope, message } = inbound.parsed;
+    const reason = `Waiting for revision ${stream.revision + 1n}`;
+    await this.treasury.recordProcessed(trx, processed(inbound, fingerprint, 'PARKED', reason));
     const parked = await this.treasury.park(trx, {
       messageId: envelope.messageId,
       programId: envelope.programId,
       revision: BigInt(envelope.revision),
       rawValue: inbound.rawValue,
       rejected: false,
+      limit: message?.type === TreasuryMessageType.ProgramLimitSet ? pendingLimit(message) : null,
       source: inbound.source,
     });
     if (parked) {
-      return { outcome: 'PARKED', reason, drained: 0, deadLettered: 0 };
+      return { outcome: 'PARKED', reason, deadLettered: 0 };
     }
     const conflict = `Another message is already parked for revision ${envelope.revision}`;
-    const deadLettered = await this.reject(
-      trx,
-      envelope,
-      inbound.rawValue,
-      inbound.source,
-      conflict,
-    );
-    return { outcome: 'REJECTED', reason: conflict, drained: 0, deadLettered };
+    const deadLettered = await this.reject(trx, inbound, conflict);
+    return { outcome: 'REJECTED', reason: conflict, deadLettered };
   }
 
-  private async drain(
-    trx: DbTransaction,
-    programId: string,
-  ): Promise<{ drained: number; deadLettered: number }> {
+  private async drain(programId: string): Promise<DrainResult> {
     let drained = 0;
     let deadLettered = 0;
     for (;;) {
-      const current = await this.treasury.lockStream(trx, programId);
-      const next = await this.treasury.takePending(trx, programId, current + 1n);
+      const batch = await this.db.transaction().execute((trx) => this.drainBatch(trx, programId));
+      drained += batch.drained;
+      deadLettered += batch.deadLettered;
+      if (batch.drained < DRAIN_BATCH) {
+        return { drained, deadLettered };
+      }
+    }
+  }
+
+  private async drainBatch(trx: DbTransaction, programId: string): Promise<DrainResult> {
+    let drained = 0;
+    let deadLettered = 0;
+    while (drained < DRAIN_BATCH) {
+      const stream = await this.treasury.lockStream(trx, programId);
+      const next = await this.treasury.takePending(trx, programId, stream.revision + 1n);
       if (next === null) {
         return { drained, deadLettered };
       }
@@ -156,7 +180,7 @@ export class ApplyTreasuryMessage {
       if (parsed.kind === 'unreadable') {
         throw new Error(`Parked message ${next.messageId} is unreadable`);
       }
-      const result = await this.handle(trx, current, {
+      const result = await this.handle(trx, stream, {
         parsed,
         rawValue: next.rawValue,
         source: next.source,
@@ -166,29 +190,26 @@ export class ApplyTreasuryMessage {
         await this.treasury.updateOutcome(trx, next.messageId, 'APPLIED', null);
       }
     }
+    return { drained, deadLettered };
   }
 
   private async handle(
     trx: DbTransaction,
-    current: bigint,
-    candidate: Candidate,
+    stream: StreamPosition,
+    inbound: InboundTreasuryMessage,
   ): Promise<HandleResult> {
-    const { envelope } = candidate.parsed;
+    const { envelope, message } = inbound.parsed;
     const revision = BigInt(envelope.revision);
     const program = await this.capacity.lockProgram(trx, envelope.programId);
-    const result = await this.dispatch(trx, program, candidate.parsed);
+    const result = await this.dispatch(trx, program, stream, inbound.parsed);
     if (result.applied) {
-      await this.treasury.setStreamRevision(trx, envelope.programId, revision);
+      const snapshotAsOf =
+        message?.type === TreasuryMessageType.ProgramSnapshot ? new Date(message.asOf) : undefined;
+      await this.treasury.setStreamRevision(trx, envelope.programId, revision, snapshotAsOf);
       return { ...result, deadLettered: 0 };
     }
-    const deadLettered = await this.reject(
-      trx,
-      envelope,
-      candidate.rawValue,
-      candidate.source,
-      result.reason,
-    );
-    if (revision === current + 1n) {
+    const deadLettered = await this.reject(trx, inbound, result.reason);
+    if (revision === stream.revision + 1n) {
       await this.treasury.setStreamRevision(trx, envelope.programId, revision);
       return { ...result, deadLettered };
     }
@@ -196,29 +217,37 @@ export class ApplyTreasuryMessage {
       messageId: envelope.messageId,
       programId: envelope.programId,
       revision,
-      rawValue: candidate.rawValue,
+      rawValue: inbound.rawValue,
       rejected: true,
-      source: candidate.source,
+      limit: null,
+      source: inbound.source,
     });
     return { ...result, deadLettered };
   }
 
   private async reject(
     trx: DbTransaction,
-    envelope: TreasuryEnvelope,
-    rawValue: string,
-    source: MessageSource,
+    inbound: InboundTreasuryMessage,
     reason: string,
   ): Promise<number> {
-    await this.treasury.updateOutcome(trx, envelope.messageId, 'REJECTED', reason);
+    await this.treasury.updateOutcome(trx, inbound.parsed.envelope.messageId, 'REJECTED', reason);
+    return this.deadLetter(trx, inbound, reason);
+  }
+
+  private async deadLetter(
+    trx: DbTransaction,
+    inbound: InboundTreasuryMessage,
+    reason: string,
+  ): Promise<number> {
+    const { envelope } = inbound.parsed;
     const added = await this.treasury.addDeadLetter(trx, {
       messageId: envelope.messageId,
       programId: envelope.programId,
       revision: BigInt(envelope.revision),
       reason,
       key: Buffer.from(envelope.programId, 'utf8'),
-      payload: Buffer.from(rawValue, 'utf8'),
-      source,
+      payload: Buffer.from(inbound.rawValue, 'utf8'),
+      source: inbound.source,
     });
     return added ? 1 : 0;
   }
@@ -226,6 +255,7 @@ export class ApplyTreasuryMessage {
   private async dispatch(
     trx: DbTransaction,
     program: Program | null,
+    stream: StreamPosition,
     parsed: ReadableTreasuryMessage,
   ): Promise<ApplyResult> {
     const message = parsed.message;
@@ -239,7 +269,7 @@ export class ApplyTreasuryMessage {
       if (message.type === TreasuryMessageType.InvoiceRepaid) {
         return await this.repay(trx, program, message);
       }
-      return await this.reconcile(trx, program, message);
+      return await this.reconcile(trx, program, stream, message);
     } catch (error) {
       if (error instanceof CapacityError) {
         return rejected(`${error.code}: ${error.message}`);
@@ -301,11 +331,18 @@ export class ApplyTreasuryMessage {
   private async reconcile(
     trx: DbTransaction,
     existing: Program | null,
+    stream: StreamPosition,
     message: ProgramSnapshot,
   ): Promise<ApplyResult> {
     if (existing !== null && existing.currency !== message.currency) {
       return rejected(
         `Programme currency ${existing.currency} cannot change to ${message.currency}`,
+      );
+    }
+    const asOf = new Date(message.asOf);
+    if (stream.snapshotAsOf !== null && asOf < stream.snapshotAsOf) {
+      return rejected(
+        `Snapshot asOf ${asOf.toISOString()} is older than the last applied snapshot (${stream.snapshotAsOf.toISOString()})`,
       );
     }
     const revision = BigInt(message.revision);
@@ -324,6 +361,7 @@ export class ApplyTreasuryMessage {
         invoiceId: entry.invoiceId,
         invoiceAmountMinor: entry.invoiceAmount,
         invoiceCurrency: entry.invoiceCurrency,
+        outstandingInvoiceMinor: entry.outstandingInvoiceAmount,
         bookedMinor: entry.bookedAmount,
       })),
     });
@@ -387,32 +425,37 @@ export class ApplyTreasuryMessage {
     changes: readonly ReconciliationChange[],
   ): Promise<Map<string, string>> {
     const imports: NewReservation[] = [];
-    const ids = new Map<string, string>();
+    const rebooks: ReservationRebook[] = [];
     for (const change of changes) {
       if (change.kind === 'import') {
         imports.push({
           programId: program.id,
           invoiceId: change.entry.invoiceId,
+          status: change.status,
           origin: 'TREASURY',
           invoiceAmountMinor: change.entry.invoiceAmountMinor,
           invoiceCurrency: change.entry.invoiceCurrency,
+          invoiceReleasedMinor: change.invoiceReleasedMinor,
           bookedMinor: change.entry.bookedMinor,
           fx: null,
         });
         continue;
       }
-      await this.capacity.updateReservation(trx, change.reservation.id, {
+      rebooks.push({
+        id: change.reservation.id,
         status: change.status,
         invoiceReleasedMinor: change.invoiceReleasedAfterMinor,
         bookedMinor: change.bookedAfterMinor,
         releasedMinor: change.releasedAfterMinor,
         allocationBase: change.allocationBase,
       });
-      ids.set(change.reservation.invoiceId, change.reservation.id);
     }
-    const imported = await this.capacity.insertReservations(trx, imports);
-    for (const [invoiceId, id] of imported) {
-      ids.set(invoiceId, id);
+    await this.capacity.rebookReservations(trx, rebooks);
+    const ids = await this.capacity.insertReservations(trx, imports);
+    for (const change of changes) {
+      if (change.kind === 'adjust') {
+        ids.set(change.reservation.invoiceId, change.reservation.id);
+      }
     }
     return ids;
   }
@@ -438,8 +481,27 @@ export class ApplyTreasuryMessage {
   }
 }
 
+function fingerprintOf(rawValue: string): Buffer {
+  return createHash('sha256').update(rawValue, 'utf8').digest();
+}
+
+function classify(parsed: ReadableTreasuryMessage): MessageClass {
+  if (parsed.message === null) {
+    return 'INVALID';
+  }
+  if (parsed.message.type === TreasuryMessageType.ProgramSnapshot) {
+    return 'SNAPSHOT';
+  }
+  return 'DELTA';
+}
+
+function pendingLimit(message: ProgramLimitSet): PendingLimit {
+  return { limitMinor: message.limit, currency: message.currency };
+}
+
 function processed(
   inbound: InboundTreasuryMessage,
+  fingerprint: Buffer,
   outcome: 'APPLIED' | 'PARKED' | 'STALE',
   reason: string | null,
 ) {
@@ -449,6 +511,7 @@ function processed(
     programId: envelope.programId,
     revision: BigInt(envelope.revision),
     type: envelope.type,
+    fingerprint,
     outcome,
     reason,
     source: inbound.source,

@@ -3,16 +3,13 @@ import { DATABASE, type Db } from '../../database/database';
 import { FX_RATE_PROVIDER, type FxRateProvider } from '../../fx/fx-rate-provider';
 import {
   assertPositiveAmount,
-  isSameReservationRequest,
+  assertReplayableReservation,
   planBooking,
 } from '../domain/capacity-rules';
-import {
-  FxRateUnavailableError,
-  InvoiceConflictError,
-  ProgramNotFoundError,
-} from '../domain/errors';
+import { FxRateUnavailableError, ProgramNotFoundError } from '../domain/errors';
 import { type Program, type Reservation } from '../domain/model';
 import { CapacityRepository } from '../infrastructure/capacity.repository';
+import { TreasuryRepository } from '../infrastructure/treasury.repository';
 import { type ReserveCapacityCommand } from './commands';
 
 export interface ReserveCapacityResult {
@@ -27,6 +24,7 @@ export class ReserveCapacity {
     @Inject(DATABASE) private readonly db: Db,
     @Inject(FX_RATE_PROVIDER) private readonly fx: FxRateProvider,
     @Inject(CapacityRepository) private readonly repository: CapacityRepository,
+    @Inject(TreasuryRepository) private readonly treasury: TreasuryRepository,
   ) {}
 
   async execute(command: ReserveCapacityCommand): Promise<ReserveCapacityResult> {
@@ -39,9 +37,7 @@ export class ReserveCapacity {
 
       const existing = await this.repository.findReservation(trx, program.id, command.invoiceId);
       if (existing !== null) {
-        if (!isSameReservationRequest(existing, command.invoiceAmount)) {
-          throw new InvoiceConflictError(command.invoiceId);
-        }
+        assertReplayableReservation(existing, command.invoiceAmount);
         return { program, reservation: existing, created: false };
       }
 
@@ -50,13 +46,16 @@ export class ReserveCapacity {
         throw new FxRateUnavailableError(command.invoiceAmount.currency, program.currency);
       }
 
-      const plan = planBooking(program, command.invoiceAmount, rate);
+      const pendingLimit = await this.treasury.lowestPendingLimit(trx, program);
+      const plan = planBooking(program, command.invoiceAmount, rate, pendingLimit);
       const reservation = await this.repository.insertReservation(trx, {
         programId: program.id,
         invoiceId: command.invoiceId,
+        status: 'ACTIVE',
         origin: 'API',
         invoiceAmountMinor: command.invoiceAmount.minor,
         invoiceCurrency: command.invoiceAmount.currency,
+        invoiceReleasedMinor: 0n,
         bookedMinor: plan.bookedMinor,
         fx: plan.fx,
       });

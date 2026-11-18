@@ -2,6 +2,7 @@ import { type CurrencyCode, INT64_MAX } from '../../money';
 import { AmountOutOfRangeCapacityError } from './errors';
 import {
   type AllocationBase,
+  outstandingInvoiceMinor,
   outstandingMinor,
   type Program,
   type Reservation,
@@ -9,18 +10,24 @@ import {
 } from './model';
 
 export type DiscrepancyKind =
-  'TREASURY_AMOUNT_LOWER' | 'MISSING_FROM_SNAPSHOT' | 'RELEASED_LOCALLY' | 'INVOICE_MISMATCH';
+  | 'TREASURY_AMOUNT_LOWER'
+  | 'INVOICE_OUTSTANDING_LOWER'
+  | 'MISSING_FROM_SNAPSHOT'
+  | 'RELEASED_LOCALLY'
+  | 'INVOICE_MISMATCH';
 
 export type AdjustmentReason =
   | 'IMPORTED_FROM_SNAPSHOT'
   | 'TREASURY_AMOUNT_HIGHER'
   | 'TREASURY_AMOUNT_LOWER'
+  | 'TREASURY_INVOICE_REPAID'
   | 'MISSING_FROM_SNAPSHOT';
 
 export interface SnapshotReservation {
   readonly invoiceId: string;
   readonly invoiceAmountMinor: bigint;
   readonly invoiceCurrency: CurrencyCode;
+  readonly outstandingInvoiceMinor: bigint;
   readonly bookedMinor: bigint;
 }
 
@@ -32,6 +39,8 @@ export interface Snapshot {
 export interface ReservationImport {
   readonly kind: 'import';
   readonly entry: SnapshotReservation;
+  readonly invoiceReleasedMinor: bigint;
+  readonly status: Exclude<ReservationStatus, 'RELEASED'>;
   readonly deltaMinor: bigint;
   readonly reason: 'IMPORTED_FROM_SNAPSHOT';
 }
@@ -79,9 +88,12 @@ export function planReconciliation(
   for (const entry of snapshot.reservations) {
     const reservation = localByInvoice.get(entry.invoiceId);
     if (reservation === undefined) {
+      const invoiceReleasedMinor = entry.invoiceAmountMinor - entry.outstandingInvoiceMinor;
       changes.push({
         kind: 'import',
         entry,
+        invoiceReleasedMinor,
+        status: invoiceReleasedMinor > 0n ? 'PARTIALLY_RELEASED' : 'ACTIVE',
         deltaMinor: entry.bookedMinor,
         reason: 'IMPORTED_FROM_SNAPSHOT',
       });
@@ -143,26 +155,59 @@ function reconcileKnown(
     );
   }
 
+  const invoiceReleasedAfterMinor = reconcileRepayments(reservation, entry, discrepancies);
   const local = outstandingMinor(reservation);
   if (entry.bookedMinor > local) {
-    changes.push(rebook(reservation, entry.bookedMinor, 'TREASURY_AMOUNT_HIGHER'));
+    changes.push(
+      rebook(reservation, entry.bookedMinor, invoiceReleasedAfterMinor, 'TREASURY_AMOUNT_HIGHER'),
+    );
     return;
   }
-  if (entry.bookedMinor === local) {
+  if (entry.bookedMinor < local && reservation.origin === 'TREASURY') {
+    changes.push(
+      rebook(reservation, entry.bookedMinor, invoiceReleasedAfterMinor, 'TREASURY_AMOUNT_LOWER'),
+    );
     return;
+  }
+  if (entry.bookedMinor < local) {
+    discrepancies.push(
+      discrepancy(
+        reservation,
+        'TREASURY_AMOUNT_LOWER',
+        entry.bookedMinor,
+        'Treasury reports a lower booked amount for an API reservation; kept the local amount',
+      ),
+    );
+  }
+  if (invoiceReleasedAfterMinor !== reservation.invoiceReleasedMinor) {
+    changes.push(rebook(reservation, local, invoiceReleasedAfterMinor, 'TREASURY_INVOICE_REPAID'));
+  }
+}
+
+function reconcileRepayments(
+  reservation: Reservation,
+  entry: SnapshotReservation,
+  discrepancies: Discrepancy[],
+): bigint {
+  const localOutstanding = outstandingInvoiceMinor(reservation);
+  if (
+    reservation.invoiceCurrency !== entry.invoiceCurrency ||
+    entry.outstandingInvoiceMinor >= localOutstanding
+  ) {
+    return reservation.invoiceReleasedMinor;
   }
   if (reservation.origin === 'TREASURY') {
-    changes.push(rebook(reservation, entry.bookedMinor, 'TREASURY_AMOUNT_LOWER'));
-    return;
+    return reservation.invoiceAmountMinor - entry.outstandingInvoiceMinor;
   }
   discrepancies.push(
     discrepancy(
       reservation,
-      'TREASURY_AMOUNT_LOWER',
+      'INVOICE_OUTSTANDING_LOWER',
       entry.bookedMinor,
-      'Treasury reports a lower booked amount for an API reservation; kept the local amount',
+      `Treasury reports ${entry.outstandingInvoiceMinor} ${entry.invoiceCurrency} of the invoice outstanding, locally ${localOutstanding}; kept the local repayments`,
     ),
   );
+  return reservation.invoiceReleasedMinor;
 }
 
 function reconcileMissing(
@@ -197,7 +242,8 @@ function reconcileMissing(
 function rebook(
   reservation: Reservation,
   treasuryOutstandingMinor: bigint,
-  reason: 'TREASURY_AMOUNT_HIGHER' | 'TREASURY_AMOUNT_LOWER',
+  invoiceReleasedAfterMinor: bigint,
+  reason: Exclude<AdjustmentReason, 'IMPORTED_FROM_SNAPSHOT' | 'MISSING_FROM_SNAPSHOT'>,
 ): ReservationAdjustment {
   const bookedAfterMinor = reservation.releasedMinor + treasuryOutstandingMinor;
   if (bookedAfterMinor > INT64_MAX) {
@@ -208,12 +254,12 @@ function rebook(
     reservation,
     bookedAfterMinor,
     releasedAfterMinor: reservation.releasedMinor,
-    invoiceReleasedAfterMinor: reservation.invoiceReleasedMinor,
+    invoiceReleasedAfterMinor,
     allocationBase: {
-      invoiceReleasedMinor: reservation.invoiceReleasedMinor,
+      invoiceReleasedMinor: invoiceReleasedAfterMinor,
       releasedMinor: reservation.releasedMinor,
     },
-    status: reservation.status,
+    status: invoiceReleasedAfterMinor > 0n ? 'PARTIALLY_RELEASED' : 'ACTIVE',
     deltaMinor: treasuryOutstandingMinor - outstandingMinor(reservation),
     reason,
   };

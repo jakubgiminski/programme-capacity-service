@@ -29,8 +29,11 @@ export class ReservationNotFoundError extends CapacityError {
 export class InvoiceConflictError extends CapacityError {
   readonly code = 'invoice-conflict';
 
-  constructor(readonly invoiceId: string) {
-    super(`Invoice ${invoiceId} already has a reservation with a different amount or currency`);
+  constructor(
+    readonly invoiceId: string,
+    message = `Invoice ${invoiceId} already has a reservation with a different amount or currency`,
+  ) {
+    super(message);
   }
 }
 

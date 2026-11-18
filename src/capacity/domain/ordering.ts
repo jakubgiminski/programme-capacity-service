@@ -1,18 +1,17 @@
 export type OrderingDecision = 'STALE' | 'APPLY' | 'PARK';
 
+export type MessageClass = 'DELTA' | 'SNAPSHOT' | 'INVALID';
+
 export function decideOrdering(
   currentRevision: bigint,
   revision: bigint,
-  isValidSnapshot: boolean,
+  messageClass: MessageClass,
 ): OrderingDecision {
   if (revision <= currentRevision) {
     return 'STALE';
   }
-  if (isValidSnapshot) {
-    return 'APPLY';
+  if (messageClass === 'DELTA' && revision > currentRevision + 1n) {
+    return 'PARK';
   }
-  if (revision === currentRevision + 1n) {
-    return 'APPLY';
-  }
-  return 'PARK';
+  return 'APPLY';
 }

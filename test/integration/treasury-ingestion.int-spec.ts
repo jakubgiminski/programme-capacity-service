@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   buildCapacityServices,
   type CapacityServices,
@@ -10,6 +11,7 @@ import {
   testActor,
   USD,
 } from '../support/capacity-fixture';
+import { TreasuryRepository } from '../../src/capacity/infrastructure/treasury.repository';
 import { createTestDatabase, type TestDatabase } from '../support/test-database';
 import { inbound, invoiceRepaid, limitSet, snapshot } from '../support/treasury-messages';
 
@@ -490,7 +492,11 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
     await apply(
       invoiceRepaid(`${id}-2`, id, 2, 'TRE-1', 'TR-1', { amount: '50', currency: 'USD' }),
     );
-    await apply(snapshot(`${id}-3`, id, 3, '100000', [{ ...entry, bookedAmount: '100' }]));
+    await apply(
+      snapshot(`${id}-3`, id, 3, '100000', [
+        { ...entry, outstandingInvoiceAmount: '50', bookedAmount: '100' },
+      ]),
+    );
 
     await apply(invoiceRepaid(`${id}-4`, id, 4, 'TRE-1', 'TR-2', { amount: '1', currency: 'USD' }));
     await apply(invoiceRepaid(`${id}-5`, id, 5, 'TRE-1', 'TR-3'));
@@ -505,6 +511,245 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
     await expectInvariants(database.db, id);
   });
 
+  it('ends in the same state whether a snapshot arrives before or after a repayment it covers', async () => {
+    const entry = { invoiceId: 'TRE-1', invoiceAmount: '100', invoiceCurrency: 'USD' };
+    const messages = (id: string) => [
+      snapshot(`${id}-1`, id, 1, '100000', [{ ...entry, bookedAmount: '100' }]),
+      invoiceRepaid(`${id}-2`, id, 2, 'TRE-1', 'TR-1', { amount: '40', currency: 'USD' }),
+      snapshot(`${id}-3`, id, 3, '100000', [
+        { ...entry, outstandingInvoiceAmount: '60', bookedAmount: '60' },
+      ]),
+      invoiceRepaid(`${id}-4`, id, 4, 'TRE-1', 'TR-2', { amount: '60', currency: 'USD' }),
+    ];
+    const inOrder = nextProgramId();
+    const outOfOrder = nextProgramId();
+
+    for (const message of messages(inOrder)) {
+      await apply(message);
+    }
+    const [first, second, third, fourth] = messages(outOfOrder);
+    const results = [];
+    for (const message of [first!, third!, second!, fourth!]) {
+      results.push((await apply(message)).outcome);
+    }
+
+    expect(results).toEqual(['APPLIED', 'APPLIED', 'STALE', 'APPLIED']);
+    for (const id of [inOrder, outOfOrder]) {
+      const details = await services.queries.getReservation(id, 'TRE-1');
+      expect(details.reservation).toMatchObject({
+        status: 'RELEASED',
+        invoiceReleasedMinor: 100n,
+      });
+      expect((await services.queries.getCapacity(id)).program.utilisedMinor).toBe(0n);
+      await expectInvariants(database.db, id);
+    }
+  });
+
+  it('imports a partially repaid invoice and releases it fully on the final repayment', async () => {
+    const id = nextProgramId();
+    await apply(
+      snapshot(`${id}-1`, id, 1, '100000', [
+        {
+          invoiceId: 'TRE-1',
+          invoiceAmount: '100',
+          invoiceCurrency: 'USD',
+          outstandingInvoiceAmount: '60',
+          bookedAmount: '60',
+        },
+      ]),
+    );
+
+    const imported = await services.queries.getReservation(id, 'TRE-1');
+    const partial = await apply(
+      invoiceRepaid(`${id}-2`, id, 2, 'TRE-1', 'TR-1', { amount: '30', currency: 'USD' }),
+    );
+    const final = await apply(
+      invoiceRepaid(`${id}-3`, id, 3, 'TRE-1', 'TR-2', { amount: '30', currency: 'USD' }),
+    );
+
+    expect(imported.reservation).toMatchObject({
+      status: 'PARTIALLY_RELEASED',
+      invoiceReleasedMinor: 40n,
+      bookedMinor: 60n,
+      releasedMinor: 0n,
+    });
+    expect([partial.outcome, final.outcome]).toEqual(['APPLIED', 'APPLIED']);
+    const details = await services.queries.getReservation(id, 'TRE-1');
+    expect(details.releases.map((release) => release.freedMinor)).toEqual([30n, 30n]);
+    expect(details.reservation.status).toBe('RELEASED');
+    await expectInvariants(database.db, id);
+  });
+
+  it('refuses an API reservation for an invoice treasury already tracks', async () => {
+    const id = nextProgramId();
+    await apply(
+      snapshot(`${id}-1`, id, 1, '100000', [
+        { invoiceId: 'TRE-1', invoiceAmount: '100', invoiceCurrency: 'USD', bookedAmount: '0' },
+      ]),
+    );
+    const before = await programState(database.db, id);
+
+    await expect(
+      services.reserve.execute({
+        programId: id,
+        invoiceId: 'TRE-1',
+        invoiceAmount: money(100n, USD),
+        actor: testActor,
+      }),
+    ).rejects.toThrow(/tracked from treasury/);
+    expect(await programState(database.db, id)).toEqual(before);
+  });
+
+  it('admits reservations against a lower limit parked behind a gap', async () => {
+    const id = nextProgramId();
+    await apply(limitSet(`${id}-1`, id, 1, '1000'));
+    const reserve = (invoiceId: string, minor: bigint) =>
+      services.reserve.execute({
+        programId: id,
+        invoiceId,
+        invoiceAmount: money(minor, USD),
+        actor: testActor,
+      });
+
+    const parked = await apply(limitSet(`${id}-3`, id, 3, '300'));
+    const gap = await services.queries.getCapacity(id);
+    await reserve('INV-1', 300n);
+    await expect(reserve('INV-2', 1n)).rejects.toMatchObject({
+      code: 'insufficient-capacity',
+      availableMinor: 0n,
+    });
+    await apply(limitSet(`${id}-2`, id, 2, '2000'));
+    const closed = await services.queries.getCapacity(id);
+
+    expect(parked.outcome).toBe('PARKED');
+    expect(gap.program.limitMinor).toBe(1_000n);
+    expect(gap.availableMinor).toBe(300n);
+    expect(gap.treasury).toMatchObject({
+      revision: 1n,
+      parkedMessages: 1,
+      pendingLimitMinor: 300n,
+    });
+    expect(gap.treasury.oldestParkedAt).toBeInstanceOf(Date);
+    expect(closed.program).toMatchObject({ limitMinor: 300n, utilisedMinor: 300n });
+    expect(closed.treasury).toEqual({
+      revision: 3n,
+      parkedMessages: 0,
+      oldestParkedAt: null,
+      pendingLimitMinor: null,
+    });
+    await expectInvariants(database.db, id);
+  });
+
+  it('rejects an invalid message ahead of a gap on arrival and keeps its revision slot', async () => {
+    const id = nextProgramId();
+    await apply(limitSet(`${id}-1`, id, 1, '1000'));
+
+    const invalid = await apply({ ...snapshot(`${id}-3`, id, 3, '3000', []), limit: '-1' });
+    const covering = await apply(snapshot(`${id}-4`, id, 4, '4000', []));
+
+    expect(invalid).toMatchObject({ outcome: 'REJECTED', deadLettered: 1 });
+    expect(covering.outcome).toBe('APPLIED');
+    expect((await deadLetters(id)).map((row) => row.message_id)).toEqual([`${id}-3`]);
+    expect(await outcomes(id)).toEqual([
+      { message_id: `${id}-1`, outcome: 'APPLIED' },
+      { message_id: `${id}-3`, outcome: 'REJECTED' },
+      { message_id: `${id}-4`, outcome: 'APPLIED' },
+    ]);
+    expect(await streamRevision(id)).toBe(4n);
+  });
+
+  it('dead-letters a reused message ID that carries a different message', async () => {
+    const id = nextProgramId();
+    const other = nextProgramId();
+    await apply(limitSet(`${id}-1`, id, 1, '1000'));
+
+    const reusedRevision = await apply(limitSet(`${id}-1`, id, 2, '2000'));
+    const reusedProgramme = await apply(limitSet(`${id}-1`, other, 1, '5000'));
+    const genuineReplay = await apply(limitSet(`${id}-1`, id, 1, '1000'));
+
+    expect(reusedRevision).toMatchObject({ outcome: 'REJECTED', deadLettered: 1 });
+    expect(reusedProgramme).toMatchObject({ outcome: 'REJECTED', deadLettered: 1 });
+    expect(genuineReplay.outcome).toBe('DUPLICATE');
+    expect(await outcomes(id)).toEqual([{ message_id: `${id}-1`, outcome: 'APPLIED' }]);
+    expect(await streamRevision(id)).toBe(1n);
+    expect((await deadLetters(id)).map((row) => row.reason)).toEqual([
+      `Message ID ${id}-1 was already used for a different message`,
+    ]);
+    expect(await deadLetters(other)).toHaveLength(1);
+  });
+
+  it('rejects a snapshot whose asOf is older than the last applied snapshot', async () => {
+    const id = nextProgramId();
+    await apply({ ...snapshot(`${id}-1`, id, 1, '1000', []), asOf: '2026-11-18T10:00:00Z' });
+
+    const regressing = await apply({
+      ...snapshot(`${id}-2`, id, 2, '2000', []),
+      asOf: '2026-11-18T09:00:00Z',
+    });
+    const sameInstant = await apply({
+      ...snapshot(`${id}-3`, id, 3, '3000', []),
+      asOf: '2026-11-18T10:00:00Z',
+    });
+
+    expect(regressing).toMatchObject({ outcome: 'REJECTED', deadLettered: 1 });
+    expect(regressing.reason).toMatch(/older than the last applied snapshot/);
+    expect(sameInstant.outcome).toBe('APPLIED');
+    expect((await services.queries.getCapacity(id)).program.limitMinor).toBe(3_000n);
+  });
+
+  it('drains a long backlog in bounded transactions once the gap closes', async () => {
+    const id = nextProgramId();
+    await apply(limitSet(`${id}-1`, id, 1, '1000'));
+    for (let revision = 3; revision <= 252; revision += 1) {
+      await apply(limitSet(`${id}-${revision}`, id, revision, String(revision * 10)));
+    }
+
+    const closing = await apply(limitSet(`${id}-2`, id, 2, '20'));
+
+    expect(closing).toMatchObject({ outcome: 'APPLIED', drained: 250 });
+    expect(await streamRevision(id)).toBe(252n);
+    expect((await services.queries.getCapacity(id)).program.limitMinor).toBe(2_520n);
+    const parked = await database.db
+      .selectFrom('pending_treasury_messages')
+      .select('message_id')
+      .where('program_id', '=', id)
+      .execute();
+    expect(parked).toEqual([]);
+  });
+
+  it('resumes an interrupted drain when the closing message is redelivered', async () => {
+    const id = nextProgramId();
+    await apply(limitSet(`${id}-1`, id, 1, '1000'));
+    await apply(limitSet(`${id}-3`, id, 3, '3000'));
+    const closing = limitSet(`${id}-2`, id, 2, '2000');
+    await database.db.transaction().execute(async (trx) => {
+      const treasury = new TreasuryRepository();
+      await treasury.lockStream(trx, id);
+      await treasury.setStreamRevision(trx, id, 2n);
+      await trx
+        .insertInto('processed_messages')
+        .values({
+          message_id: `${id}-2`,
+          program_id: id,
+          revision: 2n,
+          type: 'ProgramLimitSet',
+          fingerprint: createHash('sha256').update(JSON.stringify(closing)).digest(),
+          outcome: 'APPLIED',
+          reason: null,
+          source_topic: 'treasury.test',
+          source_partition: 0,
+          source_offset: '0',
+        })
+        .execute();
+    });
+
+    const redelivered = await apply(closing);
+
+    expect(redelivered).toMatchObject({ outcome: 'DUPLICATE', drained: 1 });
+    expect(await streamRevision(id)).toBe(3n);
+    expect((await services.queries.getCapacity(id)).program.limitMinor).toBe(3_000n);
+  });
+
   it('accepts zero treasury exposure for open and new treasury invoices', async () => {
     const id = nextProgramId();
     const entry = { invoiceId: 'TRE-1', invoiceAmount: '100', invoiceCurrency: 'USD' };
@@ -515,7 +760,7 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
 
     const zero = await apply(
       snapshot(`${id}-3`, id, 3, '100000', [
-        { ...entry, bookedAmount: '0' },
+        { ...entry, outstandingInvoiceAmount: '50', bookedAmount: '0' },
         { invoiceId: 'TRE-2', invoiceAmount: '40', invoiceCurrency: 'USD', bookedAmount: '0' },
       ]),
     );
@@ -633,10 +878,23 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
       ]);
 
       expect(release.status).toBe('fulfilled');
-      expect(merge.status).toBe('fulfilled');
+      expect(merge).toMatchObject({ status: 'fulfilled', value: { outcome: 'APPLIED' } });
       const details = await services.queries.getReservation(id, 'INV-1');
       expect(details.reservation.status).toBe('RELEASED');
       expect((await services.queries.getCapacity(id)).program.utilisedMinor).toBe(0n);
+      const adjustments = await database.db
+        .selectFrom('ledger_entries')
+        .select('delta_minor')
+        .where('program_id', '=', id)
+        .where('type', '=', 'RECONCILE_ADJUST')
+        .execute();
+      const discrepancies = (await services.queries.listOpenDiscrepancies(id)).discrepancies;
+      const snapshotFirst = adjustments.length > 0;
+      expect(adjustments).toEqual(snapshotFirst ? [{ delta_minor: 200n }] : []);
+      expect(discrepancies.map((item) => item.kind)).toEqual(
+        snapshotFirst ? [] : ['RELEASED_LOCALLY'],
+      );
+      expect(details.reservation.releasedMinor).toBe(snapshotFirst ? 1_200n : 1_000n);
       await expectInvariants(database.db, id);
     }
   });

@@ -1,15 +1,21 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DATABASE, type Db, type DbTransaction } from '../../database/database';
 import { ProgramNotFoundError, ReservationNotFoundError } from '../domain/errors';
-import { availableMinor, type Program, type Release, type Reservation } from '../domain/model';
+import { admissionLimitMinor } from '../domain/capacity-rules';
+import { type Program, type Release, type Reservation } from '../domain/model';
 import { CapacityRepository } from '../infrastructure/capacity.repository';
-import { type OpenDiscrepancy, TreasuryRepository } from '../infrastructure/treasury.repository';
+import {
+  type OpenDiscrepancy,
+  type StreamStatus,
+  TreasuryRepository,
+} from '../infrastructure/treasury.repository';
 
 export interface CapacityView {
   readonly program: Program;
   readonly availableMinor: bigint;
   readonly overUtilised: boolean;
   readonly openDiscrepancies: number;
+  readonly treasury: StreamStatus;
 }
 
 export interface DiscrepancyList {
@@ -37,13 +43,15 @@ export class CapacityQueries {
       if (program === null) {
         throw new ProgramNotFoundError(programId);
       }
-      const available = availableMinor(program);
-      const openDiscrepancies = await this.treasury.countOpenDiscrepancies(trx, programId);
+      const treasury = await this.treasury.streamStatus(trx, program);
+      const available =
+        admissionLimitMinor(program, treasury.pendingLimitMinor) - program.utilisedMinor;
       return {
         program,
         availableMinor: available,
         overUtilised: available < 0n,
-        openDiscrepancies,
+        openDiscrepancies: await this.treasury.countOpenDiscrepancies(trx, programId),
+        treasury,
       };
     });
   }

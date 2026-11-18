@@ -74,7 +74,7 @@ export function buildCapacityServices(db: Db, fx: FxRateProvider): CapacityServi
   return {
     repository,
     processor,
-    reserve: new ReserveCapacity(db, fx, repository),
+    reserve: new ReserveCapacity(db, fx, repository, treasuryRepository),
     release: new ReleaseReservation(db, repository, processor),
     queries: new CapacityQueries(db, repository, treasuryRepository),
     treasury: new ApplyTreasuryMessage(db, repository, treasuryRepository, processor),

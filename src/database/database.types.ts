@@ -72,13 +72,18 @@ export interface LedgerEntriesTable {
 
 export type MessageOutcome = 'APPLIED' | 'PARKED' | 'STALE' | 'REJECTED' | 'SUPERSEDED';
 export type DiscrepancyKind =
-  'TREASURY_AMOUNT_LOWER' | 'MISSING_FROM_SNAPSHOT' | 'RELEASED_LOCALLY' | 'INVOICE_MISMATCH';
+  | 'TREASURY_AMOUNT_LOWER'
+  | 'INVOICE_OUTSTANDING_LOWER'
+  | 'MISSING_FROM_SNAPSHOT'
+  | 'RELEASED_LOCALLY'
+  | 'INVOICE_MISMATCH';
 
 export interface ProcessedMessagesTable {
   message_id: string;
   program_id: string;
   revision: bigint;
   type: string;
+  fingerprint: Buffer;
   outcome: MessageOutcome;
   reason: string | null;
   source_topic: string;
@@ -94,6 +99,8 @@ export interface PendingTreasuryMessagesTable {
   revision: bigint;
   raw_value: string;
   rejected: Generated<boolean>;
+  limit_minor: bigint | null;
+  limit_currency: string | null;
   source_topic: string;
   source_partition: number;
   source_offset: string;
@@ -103,6 +110,7 @@ export interface PendingTreasuryMessagesTable {
 export interface TreasuryStreamsTable {
   program_id: string;
   revision: Generated<bigint>;
+  snapshot_as_of: Date | null;
   updated_at: UpdatedAt;
 }
 
@@ -113,7 +121,7 @@ export interface TreasuryDeadLettersTable {
   revision: bigint | null;
   reason: string;
   message_key: Buffer | null;
-  payload: Buffer;
+  payload: Buffer | null;
   source_topic: string;
   source_partition: number;
   source_offset: string;
@@ -154,5 +162,4 @@ export interface Database {
 export type ProgramRow = Selectable<ProgramsTable>;
 export type ReservationRow = Selectable<ReservationsTable>;
 export type ReleaseRow = Selectable<ReleasesTable>;
-export type LedgerEntryRow = Selectable<LedgerEntriesTable>;
 export type NewLedgerEntry = Insertable<LedgerEntriesTable>;

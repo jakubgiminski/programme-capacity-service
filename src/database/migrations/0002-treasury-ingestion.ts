@@ -5,6 +5,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     CREATE TABLE treasury_streams (
       program_id text PRIMARY KEY,
       revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0),
+      snapshot_as_of timestamptz,
       updated_at timestamptz NOT NULL DEFAULT now()
     )
   `.execute(db);
@@ -15,6 +16,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       program_id text NOT NULL,
       revision bigint NOT NULL,
       type text NOT NULL,
+      fingerprint bytea NOT NULL,
       outcome text NOT NULL
         CHECK (outcome IN ('APPLIED', 'PARKED', 'STALE', 'REJECTED', 'SUPERSEDED')),
       reason text,
@@ -33,11 +35,15 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       revision bigint NOT NULL CHECK (revision > 0),
       raw_value text NOT NULL,
       rejected boolean NOT NULL DEFAULT false,
+      limit_minor bigint CHECK (limit_minor >= 0),
+      limit_currency char(3),
       source_topic text NOT NULL,
       source_partition integer NOT NULL,
       source_offset text NOT NULL,
       received_at timestamptz NOT NULL DEFAULT now(),
-      CONSTRAINT pending_treasury_messages_program_revision_unique UNIQUE (program_id, revision)
+      CONSTRAINT pending_treasury_messages_program_revision_unique UNIQUE (program_id, revision),
+      CONSTRAINT pending_treasury_messages_limit_complete
+        CHECK ((limit_minor IS NULL) = (limit_currency IS NULL))
     )
   `.execute(db);
 
@@ -49,7 +55,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       revision bigint,
       reason text NOT NULL,
       message_key bytea,
-      payload bytea NOT NULL,
+      payload bytea,
       source_topic text NOT NULL,
       source_partition integer NOT NULL,
       source_offset text NOT NULL,
@@ -73,7 +79,13 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       program_id text NOT NULL REFERENCES programs (id),
       invoice_id text NOT NULL,
       kind text NOT NULL CHECK (
-        kind IN ('TREASURY_AMOUNT_LOWER', 'MISSING_FROM_SNAPSHOT', 'RELEASED_LOCALLY', 'INVOICE_MISMATCH')
+        kind IN (
+          'TREASURY_AMOUNT_LOWER',
+          'INVOICE_OUTSTANDING_LOWER',
+          'MISSING_FROM_SNAPSHOT',
+          'RELEASED_LOCALLY',
+          'INVOICE_MISMATCH'
+        )
       ),
       local_status text,
       local_outstanding_minor bigint,

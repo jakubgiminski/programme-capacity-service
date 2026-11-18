@@ -4,7 +4,6 @@ import { type CurrencyCode, currencyExponent, parseCurrency } from './currency';
 import { type FxRate, identityRate, parseFxRate } from './fx-rate';
 import { INT64_MAX, Money } from './money';
 import { AmountOutOfRangeError, CurrencyMismatchError, InvalidFxRateError } from './money-errors';
-import { proportionalShare } from './rounding';
 
 const USD = parseCurrency('USD');
 const EUR = parseCurrency('EUR');
@@ -103,52 +102,5 @@ describe('convert', () => {
         },
       ),
     );
-  });
-});
-
-describe('partial release allocation', () => {
-  function releaseInSlices(booked: bigint, invoiceAmount: bigint, slices: bigint[]): bigint[] {
-    let releasedInvoice = 0n;
-    let releasedBooked = 0n;
-    return slices.map((slice) => {
-      releasedInvoice += slice;
-      const cumulative =
-        releasedInvoice === invoiceAmount
-          ? booked
-          : proportionalShare(booked, releasedInvoice, invoiceAmount, 'DOWN');
-      const freed = cumulative - releasedBooked;
-      releasedBooked = cumulative;
-      return freed;
-    });
-  }
-
-  it('frees exactly the booked amount once the whole invoice is released', () => {
-    fc.assert(
-      fc.property(
-        fc.bigInt({ min: 1n, max: 10n ** 18n }),
-        fc.array(fc.bigInt({ min: 1n, max: 10n ** 6n }), { minLength: 1, maxLength: 20 }),
-        (booked, slices) => {
-          const invoiceAmount = slices.reduce((sum, slice) => sum + slice, 0n);
-          const freed = releaseInSlices(booked, invoiceAmount, slices);
-          let cumulativeInvoice = 0n;
-          let cumulativeFreed = 0n;
-          freed.forEach((amount, index) => {
-            cumulativeInvoice += slices[index]!;
-            cumulativeFreed += amount;
-            expect(amount >= 0n).toBe(true);
-            expect(cumulativeFreed * invoiceAmount <= booked * cumulativeInvoice).toBe(true);
-            expect((cumulativeFreed + 1n) * invoiceAmount > booked * cumulativeInvoice).toBe(true);
-          });
-          expect(cumulativeFreed).toBe(booked);
-        },
-      ),
-    );
-  });
-
-  it('never frees more than the proportional share before the final release', () => {
-    const freed = releaseInSlices(1_000n, 3n, [1n, 1n, 1n]);
-
-    expect(freed).toEqual([333n, 333n, 334n]);
-    expect(releaseInSlices(2n, 3n, [1n, 1n, 1n])).toEqual([0n, 1n, 1n]);
   });
 });

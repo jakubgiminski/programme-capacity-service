@@ -10,12 +10,12 @@ import {
   AmountOutOfRangeCapacityError,
   InsufficientCapacityError,
   InvalidAmountCapacityError,
+  InvoiceConflictError,
   OverReleaseError,
   ReleaseCurrencyMismatchError,
   ReservationAlreadyReleasedError,
 } from './errors';
 import {
-  availableMinor,
   type FxSnapshot,
   outstandingInvoiceMinor,
   type Program,
@@ -36,11 +36,26 @@ export interface ReleasePlan {
   readonly status: ReservationStatus;
 }
 
-export function isSameReservationRequest(existing: Reservation, invoiceAmount: Money): boolean {
-  return (
-    existing.invoiceCurrency === invoiceAmount.currency &&
-    existing.invoiceAmountMinor === invoiceAmount.minor
-  );
+export function assertReplayableReservation(existing: Reservation, invoiceAmount: Money): void {
+  if (existing.origin !== 'API') {
+    throw new InvoiceConflictError(
+      existing.invoiceId,
+      `Invoice ${existing.invoiceId} is already tracked from treasury and cannot be reserved through the API`,
+    );
+  }
+  if (
+    existing.invoiceCurrency !== invoiceAmount.currency ||
+    existing.invoiceAmountMinor !== invoiceAmount.minor
+  ) {
+    throw new InvoiceConflictError(existing.invoiceId);
+  }
+}
+
+export function admissionLimitMinor(program: Program, pendingLimitMinor: bigint | null): bigint {
+  if (pendingLimitMinor === null || pendingLimitMinor >= program.limitMinor) {
+    return program.limitMinor;
+  }
+  return pendingLimitMinor;
 }
 
 export function assertPositiveAmount(amount: Money): void {
@@ -49,10 +64,15 @@ export function assertPositiveAmount(amount: Money): void {
   }
 }
 
-export function planBooking(program: Program, invoiceAmount: Money, rate: FxRate): BookingPlan {
+export function planBooking(
+  program: Program,
+  invoiceAmount: Money,
+  rate: FxRate,
+  pendingLimitMinor: bigint | null,
+): BookingPlan {
   assertPositiveAmount(invoiceAmount);
   const bookedMinor = convertRoundingUp(invoiceAmount, rate);
-  const available = availableMinor(program);
+  const available = admissionLimitMinor(program, pendingLimitMinor) - program.utilisedMinor;
   if (bookedMinor > available) {
     throw new InsufficientCapacityError(bookedMinor, available, program.currency);
   }

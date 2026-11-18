@@ -169,6 +169,7 @@ describe('Capacity HTTP API (e2e)', () => {
         available: { amount: '891498', currency: 'USD' },
         overUtilised: false,
         openDiscrepancies: 0,
+        treasury: { revision: '0', parkedMessages: 0, oldestParkedAt: null, pendingLimit: null },
         version: '1',
         updatedAt: expect.any(String),
       });

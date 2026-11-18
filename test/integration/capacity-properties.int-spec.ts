@@ -28,7 +28,11 @@ type Operation =
   | { kind: 'reserve'; invoice: number; amount: bigint; currency: CurrencyCode }
   | { kind: 'release'; invoice: number; releaseId: number; amount: bigint | null }
   | { kind: 'limit'; limit: bigint }
-  | { kind: 'snapshot'; limit: bigint; entries: { invoice: number; booked: bigint }[] };
+  | {
+      kind: 'snapshot';
+      limit: bigint;
+      entries: { invoice: number; booked: bigint; outstandingPermille: bigint }[];
+    };
 
 interface ModelReservation {
   origin: 'API' | 'TREASURY';
@@ -75,7 +79,11 @@ function expectReserve(
 ): Expected {
   const existing = model.reservations.get(invoiceId);
   if (existing !== undefined) {
-    if (existing.invoiceAmount === amount && existing.currency === currency) {
+    if (
+      existing.origin === 'API' &&
+      existing.invoiceAmount === amount &&
+      existing.currency === currency
+    ) {
       return { outcome: 'replayed' };
     }
     return { outcome: 'rejected', error: InvoiceConflictError };
@@ -151,6 +159,7 @@ interface ModelSnapshotEntry {
   invoiceId: string;
   invoiceAmount: bigint;
   currency: CurrencyCode;
+  outstandingInvoice: bigint;
   booked: bigint;
 }
 
@@ -170,14 +179,15 @@ function applyModelSnapshot(model: Model, limit: bigint, entries: ModelSnapshotE
   for (const entry of entries) {
     const reservation = model.reservations.get(entry.invoiceId);
     if (reservation === undefined) {
+      const invoiceReleased = entry.invoiceAmount - entry.outstandingInvoice;
       model.reservations.set(entry.invoiceId, {
         origin: 'TREASURY',
         currency: entry.currency,
         invoiceAmount: entry.invoiceAmount,
         booked: entry.booked,
         released: 0n,
-        invoiceReleased: 0n,
-        baseInvoiceReleased: 0n,
+        invoiceReleased,
+        baseInvoiceReleased: invoiceReleased,
         baseReleased: 0n,
         releases: new Map(),
       });
@@ -186,14 +196,22 @@ function applyModelSnapshot(model: Model, limit: bigint, entries: ModelSnapshotE
     if (!isOpen(reservation)) {
       continue;
     }
+    const treasuryOwned = reservation.origin === 'TREASURY';
     const outstanding = reservation.booked - reservation.released;
-    if (entry.booked > outstanding) {
-      rebook(reservation, entry.booked);
+    const outstandingInvoice = reservation.invoiceAmount - reservation.invoiceReleased;
+    const invoiceReleased =
+      treasuryOwned && entry.outstandingInvoice < outstandingInvoice
+        ? reservation.invoiceAmount - entry.outstandingInvoice
+        : reservation.invoiceReleased;
+    const booked =
+      entry.booked > outstanding || (entry.booked < outstanding && treasuryOwned)
+        ? entry.booked
+        : outstanding;
+    if (booked === outstanding && invoiceReleased === reservation.invoiceReleased) {
       continue;
     }
-    if (entry.booked < outstanding && reservation.origin === 'TREASURY') {
-      rebook(reservation, entry.booked);
-    }
+    reservation.invoiceReleased = invoiceReleased;
+    rebook(reservation, booked);
   }
   for (const [invoiceId, reservation] of model.reservations) {
     if (reported.has(invoiceId) || !isOpen(reservation) || reservation.origin === 'API') {
@@ -274,6 +292,7 @@ const operationArb: fc.Arbitrary<Operation> = fc.oneof(
         fc.record({
           invoice: invoiceArb,
           booked: fc.bigInt({ min: 0n, max: 300_000n }),
+          outstandingPermille: fc.bigInt({ min: 1n, max: 1_000n }),
         }),
         { selector: (entry) => entry.invoice, maxLength: 6 },
       ),
@@ -322,10 +341,14 @@ describe('capacity properties (Postgres)', () => {
                   ? []
                   : operation.entries.map((entry) => {
                       const local = model.reservations.get(`INV-${entry.invoice}`);
+                      const invoiceAmount = local?.invoiceAmount ?? entry.booked + 1n;
+                      const outstandingInvoice =
+                        (invoiceAmount * entry.outstandingPermille) / 1_000n;
                       return {
                         invoiceId: `INV-${entry.invoice}`,
-                        invoiceAmount: local?.invoiceAmount ?? entry.booked + 1n,
+                        invoiceAmount,
                         currency: local?.currency ?? USD,
+                        outstandingInvoice: outstandingInvoice > 0n ? outstandingInvoice : 1n,
                         booked: entry.booked,
                       };
                     });
@@ -341,6 +364,7 @@ describe('capacity properties (Postgres)', () => {
                         invoiceId: entry.invoiceId,
                         invoiceAmount: entry.invoiceAmount.toString(),
                         invoiceCurrency: entry.currency,
+                        outstandingInvoiceAmount: entry.outstandingInvoice.toString(),
                         bookedAmount: entry.booked.toString(),
                       })),
                     );

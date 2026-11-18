@@ -38,12 +38,18 @@ const invoiceRepaidSchema = z.strictObject({
   amount: moneySchema.optional(),
 });
 
-const snapshotReservationSchema = z.strictObject({
-  invoiceId: identifierSchema,
-  invoiceAmount: positiveMinorUnitsSchema,
-  invoiceCurrency: currencySchema,
-  bookedAmount: nonNegativeMinorUnitsSchema,
-});
+const snapshotReservationSchema = z
+  .strictObject({
+    invoiceId: identifierSchema,
+    invoiceAmount: positiveMinorUnitsSchema,
+    invoiceCurrency: currencySchema,
+    outstandingInvoiceAmount: positiveMinorUnitsSchema,
+    bookedAmount: nonNegativeMinorUnitsSchema,
+  })
+  .refine((entry) => entry.outstandingInvoiceAmount <= entry.invoiceAmount, {
+    path: ['outstandingInvoiceAmount'],
+    message: 'Outstanding invoice amount cannot exceed the invoice amount',
+  });
 
 const programSnapshotSchema = z
   .strictObject({

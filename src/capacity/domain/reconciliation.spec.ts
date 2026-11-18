@@ -44,6 +44,7 @@ function entry(overrides: Partial<SnapshotReservation> = {}): SnapshotReservatio
     invoiceId: 'INV-1',
     invoiceAmountMinor: 1_000n,
     invoiceCurrency: EUR,
+    outstandingInvoiceMinor: 1_000n,
     bookedMinor: 1_100n,
     ...overrides,
   };
@@ -81,11 +82,103 @@ describe('planReconciliation (fail-safe merge)', () => {
       {
         kind: 'import',
         entry: entry({ invoiceId: 'INV-T', bookedMinor: 777n }),
+        invoiceReleasedMinor: 0n,
+        status: 'ACTIVE',
         deltaMinor: 777n,
         reason: 'IMPORTED_FROM_SNAPSHOT',
       },
     ]);
     expect(result.utilisedAfterMinor).toBe(777n);
+  });
+
+  it('imports a partially repaid invoice with the repayments treasury reports', () => {
+    const result = plan(
+      [],
+      [entry({ invoiceId: 'INV-T', outstandingInvoiceMinor: 600n, bookedMinor: 660n })],
+    );
+
+    expect(result.changes).toEqual([
+      expect.objectContaining({
+        kind: 'import',
+        invoiceReleasedMinor: 400n,
+        status: 'PARTIALLY_RELEASED',
+        deltaMinor: 660n,
+      }),
+    ]);
+  });
+
+  it('adopts repayments treasury has seen for a TREASURY reservation', () => {
+    const result = plan(
+      [reservation({ origin: 'TREASURY', bookedMinor: 1_000n })],
+      [entry({ outstandingInvoiceMinor: 600n, bookedMinor: 600n })],
+    );
+
+    expect(result.changes).toEqual([
+      expect.objectContaining({
+        status: 'PARTIALLY_RELEASED',
+        invoiceReleasedAfterMinor: 400n,
+        bookedAfterMinor: 600n,
+        releasedAfterMinor: 0n,
+        allocationBase: { invoiceReleasedMinor: 400n, releasedMinor: 0n },
+        deltaMinor: -400n,
+        reason: 'TREASURY_AMOUNT_LOWER',
+      }),
+    ]);
+    expect(result.discrepancies).toEqual([]);
+  });
+
+  it('records adopted repayments even when the booked amount is unchanged', () => {
+    const result = plan(
+      [reservation({ origin: 'TREASURY', bookedMinor: 600n })],
+      [entry({ outstandingInvoiceMinor: 600n, bookedMinor: 600n })],
+    );
+
+    expect(result.changes).toEqual([
+      expect.objectContaining({
+        invoiceReleasedAfterMinor: 400n,
+        bookedAfterMinor: 600n,
+        deltaMinor: 0n,
+        reason: 'TREASURY_INVOICE_REPAID',
+      }),
+    ]);
+  });
+
+  it('never moves repayments backwards when treasury reports more outstanding', () => {
+    const local = [
+      reservation({
+        origin: 'TREASURY',
+        status: 'PARTIALLY_RELEASED',
+        invoiceReleasedMinor: 500n,
+        releasedMinor: 550n,
+      }),
+    ];
+
+    const result = plan(local, [entry({ outstandingInvoiceMinor: 1_000n, bookedMinor: 550n })]);
+
+    expect(result.changes).toEqual([]);
+    expect(result.discrepancies).toEqual([]);
+  });
+
+  it('keeps local repayments for an API reservation and records a discrepancy', () => {
+    const result = plan(
+      [reservation({ origin: 'API' })],
+      [entry({ outstandingInvoiceMinor: 600n, bookedMinor: 1_100n })],
+    );
+
+    expect(result.changes).toEqual([]);
+    expect(result.discrepancies).toEqual([
+      expect.objectContaining({ kind: 'INVOICE_OUTSTANDING_LOWER', localOutstandingMinor: 1_100n }),
+    ]);
+  });
+
+  it('ignores outstanding invoice amounts in a different currency', () => {
+    const result = plan(
+      [reservation({ origin: 'TREASURY' })],
+      [entry({ invoiceCurrency: USD, outstandingInvoiceMinor: 1n })],
+    );
+
+    expect(result.changes).toEqual([]);
+    expect(result.discrepancies).toEqual([expect.objectContaining({ kind: 'INVOICE_MISMATCH' })]);
   });
 
   it.each(['API', 'TREASURY'] as const)(

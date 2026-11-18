@@ -1,9 +1,16 @@
+import fc from 'fast-check';
 import { type FxRate, Money, parseCurrency, parseFxRate } from '../../money';
-import { isSameReservationRequest, planBooking, planRelease } from './capacity-rules';
+import {
+  admissionLimitMinor,
+  assertReplayableReservation,
+  planBooking,
+  planRelease,
+} from './capacity-rules';
 import {
   AmountOutOfRangeCapacityError,
   InsufficientCapacityError,
   InvalidAmountCapacityError,
+  InvoiceConflictError,
   OverReleaseError,
   ReleaseCurrencyMismatchError,
   ReservationAlreadyReleasedError,
@@ -57,7 +64,7 @@ const eurUsd: FxRate = {
 
 describe('planBooking', () => {
   it('converts with round-up and captures the FX snapshot', () => {
-    const plan = planBooking(program(), Money.of(100_001n, EUR), eurUsd);
+    const plan = planBooking(program(), Money.of(100_001n, EUR), eurUsd, null);
 
     expect(plan.bookedMinor).toBe(108_502n);
     expect(plan.fx).toEqual({
@@ -69,14 +76,19 @@ describe('planBooking', () => {
   });
 
   it('accepts a reservation that uses exactly the available capacity', () => {
-    const plan = planBooking(program({ utilisedMinor: 891_498n }), Money.of(100_001n, EUR), eurUsd);
+    const plan = planBooking(
+      program({ utilisedMinor: 891_498n }),
+      Money.of(100_001n, EUR),
+      eurUsd,
+      null,
+    );
 
     expect(plan.bookedMinor).toBe(108_502n);
   });
 
   it('rejects a reservation one minor unit above the available capacity', () => {
     expect(() =>
-      planBooking(program({ utilisedMinor: 891_499n }), Money.of(100_001n, EUR), eurUsd),
+      planBooking(program({ utilisedMinor: 891_499n }), Money.of(100_001n, EUR), eurUsd, null),
     ).toThrow(InsufficientCapacityError);
   });
 
@@ -84,7 +96,7 @@ describe('planBooking', () => {
     const overUtilised = program({ limitMinor: 100n, utilisedMinor: 150n });
     const identity: FxRate = { ...eurUsd, from: USD, scaled: 10_000_000_000n };
 
-    expect(() => planBooking(overUtilised, Money.of(1n, USD), identity)).toThrow(
+    expect(() => planBooking(overUtilised, Money.of(1n, USD), identity, null)).toThrow(
       InsufficientCapacityError,
     );
   });
@@ -92,19 +104,56 @@ describe('planBooking', () => {
   it('maps conversion overflow to a capacity error', () => {
     const jpyUsd: FxRate = { ...eurUsd, from: JPY, scaled: parseFxRate('900000000') };
 
-    expect(() => planBooking(program(), Money.of(9_000_000_000_000_000_000n, JPY), jpyUsd)).toThrow(
-      AmountOutOfRangeCapacityError,
+    expect(() =>
+      planBooking(program(), Money.of(9_000_000_000_000_000_000n, JPY), jpyUsd, null),
+    ).toThrow(AmountOutOfRangeCapacityError);
+  });
+});
+
+describe('admission against a parked treasury limit', () => {
+  it('uses the lower of the applied and the parked limit', () => {
+    expect(admissionLimitMinor(program({ limitMinor: 1_000n }), null)).toBe(1_000n);
+    expect(admissionLimitMinor(program({ limitMinor: 1_000n }), 400n)).toBe(400n);
+    expect(admissionLimitMinor(program({ limitMinor: 1_000n }), 5_000n)).toBe(1_000n);
+  });
+
+  it('rejects a booking that fits the applied limit but not a parked lower limit', () => {
+    const current = program({ limitMinor: 1_000n, utilisedMinor: 300n });
+    const identity: FxRate = { ...eurUsd, from: USD, scaled: 10_000_000_000n };
+
+    expect(planBooking(current, Money.of(100n, USD), identity, 400n).bookedMinor).toBe(100n);
+    expect(() => planBooking(current, Money.of(101n, USD), identity, 400n)).toThrow(
+      InsufficientCapacityError,
     );
   });
 });
 
-describe('isSameReservationRequest', () => {
-  it('matches on invoice amount and currency only', () => {
+describe('assertReplayableReservation', () => {
+  it('accepts the same invoice amount and currency for an API reservation', () => {
     const existing = reservation({ invoiceAmountMinor: 500n, invoiceCurrency: EUR });
 
-    expect(isSameReservationRequest(existing, Money.of(500n, EUR))).toBe(true);
-    expect(isSameReservationRequest(existing, Money.of(501n, EUR))).toBe(false);
-    expect(isSameReservationRequest(existing, Money.of(500n, USD))).toBe(false);
+    expect(() => {
+      assertReplayableReservation(existing, Money.of(500n, EUR));
+    }).not.toThrow();
+  });
+
+  it.each([
+    ['a different amount', Money.of(501n, EUR)],
+    ['a different currency', Money.of(500n, USD)],
+  ])('rejects %s', (_label, amount) => {
+    const existing = reservation({ invoiceAmountMinor: 500n, invoiceCurrency: EUR });
+
+    expect(() => {
+      assertReplayableReservation(existing, amount);
+    }).toThrow(InvoiceConflictError);
+  });
+
+  it('never replays a reservation that treasury introduced', () => {
+    const imported = reservation({ origin: 'TREASURY', invoiceAmountMinor: 500n, bookedMinor: 0n });
+
+    expect(() => {
+      assertReplayableReservation(imported, Money.of(500n, EUR));
+    }).toThrow(/tracked from treasury/);
   });
 });
 
@@ -203,7 +252,7 @@ describe('planRelease', () => {
 
   it('rejects zero amounts', () => {
     expect(() => planRelease(reservation(), Money.of(0n, EUR))).toThrow(InvalidAmountCapacityError);
-    expect(() => planBooking(program(), Money.of(0n, EUR), eurUsd)).toThrow(
+    expect(() => planBooking(program(), Money.of(0n, EUR), eurUsd, null)).toThrow(
       InvalidAmountCapacityError,
     );
   });
@@ -230,5 +279,99 @@ describe('planRelease', () => {
         null,
       ),
     ).toThrow(ReservationAlreadyReleasedError);
+  });
+});
+
+describe('partial release allocation (property)', () => {
+  function releaseInSlices(start: Reservation, slices: readonly bigint[]): bigint[] {
+    let current = start;
+    return slices.map((slice) => {
+      const plan = planRelease(current, Money.of(slice, current.invoiceCurrency));
+      current = {
+        ...current,
+        status: plan.status,
+        invoiceReleasedMinor: plan.invoiceReleasedAfterMinor,
+        releasedMinor: plan.releasedAfterMinor,
+      };
+      return plan.freedMinor;
+    });
+  }
+
+  it('frees the proportional share rounded down and exactly the booking at the end', () => {
+    fc.assert(
+      fc.property(
+        fc.bigInt({ min: 0n, max: 10n ** 18n }),
+        fc.array(fc.bigInt({ min: 1n, max: 10n ** 6n }), { minLength: 1, maxLength: 20 }),
+        (booked, slices) => {
+          const invoiceAmount = slices.reduce((sum, slice) => sum + slice, 0n);
+          const freed = releaseInSlices(
+            reservation({ invoiceAmountMinor: invoiceAmount, bookedMinor: booked }),
+            slices,
+          );
+          let cumulativeInvoice = 0n;
+          let cumulativeFreed = 0n;
+          freed.forEach((amount, index) => {
+            cumulativeInvoice += slices[index]!;
+            cumulativeFreed += amount;
+            expect(amount >= 0n).toBe(true);
+            expect(cumulativeFreed * invoiceAmount <= booked * cumulativeInvoice).toBe(true);
+            expect((cumulativeFreed + 1n) * invoiceAmount > booked * cumulativeInvoice).toBe(true);
+          });
+          expect(cumulativeFreed).toBe(booked);
+        },
+      ),
+    );
+  });
+
+  it('allocates a rebooked exposure over the remaining invoice and frees all of it', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.bigInt({ min: 1n, max: 10n ** 6n }), { minLength: 2, maxLength: 20 }),
+        fc.nat(),
+        fc.bigInt({ min: 0n, max: 10n ** 12n }),
+        fc.bigInt({ min: 0n, max: 10n ** 12n }),
+        (slices, split, booked, rebookedOutstanding) => {
+          const cut = 1 + (split % (slices.length - 1));
+          const invoiceAmount = slices.reduce((sum, slice) => sum + slice, 0n);
+          const start = reservation({ invoiceAmountMinor: invoiceAmount, bookedMinor: booked });
+          const before = releaseInSlices(start, slices.slice(0, cut));
+          const invoiceReleased = slices.slice(0, cut).reduce((sum, slice) => sum + slice, 0n);
+          const released = before.reduce((sum, amount) => sum + amount, 0n);
+          const rebooked = reservation({
+            status: 'PARTIALLY_RELEASED',
+            invoiceAmountMinor: invoiceAmount,
+            invoiceReleasedMinor: invoiceReleased,
+            bookedMinor: released + rebookedOutstanding,
+            releasedMinor: released,
+            allocationBase: { invoiceReleasedMinor: invoiceReleased, releasedMinor: released },
+          });
+
+          const after = releaseInSlices(rebooked, slices.slice(cut));
+
+          const remainingInvoice = invoiceAmount - invoiceReleased;
+          let cumulativeInvoice = 0n;
+          let cumulativeFreed = 0n;
+          after.forEach((amount, index) => {
+            cumulativeInvoice += slices[cut + index]!;
+            cumulativeFreed += amount;
+            expect(
+              cumulativeFreed * remainingInvoice <= rebookedOutstanding * cumulativeInvoice,
+            ).toBe(true);
+          });
+          expect(cumulativeFreed).toBe(rebookedOutstanding);
+        },
+      ),
+    );
+  });
+
+  it('never frees more than the proportional share before the final release', () => {
+    const thirds = [1n, 1n, 1n];
+
+    expect(releaseInSlices(reservation({ bookedMinor: 1_000n }), thirds)).toEqual([
+      333n,
+      333n,
+      334n,
+    ]);
+    expect(releaseInSlices(reservation({ bookedMinor: 2n }), thirds)).toEqual([0n, 1n, 1n]);
   });
 });
