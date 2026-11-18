@@ -21,6 +21,7 @@ export const configSchema = z.object({
   KAFKA_ENABLED: booleanFlag.default(true),
   KAFKA_BROKERS: csv.default(['localhost:19092']),
   KAFKA_CLIENT_ID: z.string().min(1).default('programme-capacity-service'),
+  FX_RATES_FILE: z.string().min(1).default('config/fx-rates.json'),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;

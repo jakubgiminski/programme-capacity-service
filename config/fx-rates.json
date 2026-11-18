@@ -1,0 +1,102 @@
+{
+  "rates": [
+    {
+      "from": "EUR",
+      "to": "USD",
+      "rate": "1.085",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "GBP",
+      "to": "USD",
+      "rate": "1.27",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "JPY",
+      "to": "USD",
+      "rate": "0.00665",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "KWD",
+      "to": "USD",
+      "rate": "3.2525",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "USD",
+      "to": "EUR",
+      "rate": "0.9217",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "GBP",
+      "to": "EUR",
+      "rate": "1.1705",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "JPY",
+      "to": "EUR",
+      "rate": "0.00613",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "KWD",
+      "to": "EUR",
+      "rate": "2.9978",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "USD",
+      "to": "JPY",
+      "rate": "150.38",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "EUR",
+      "to": "JPY",
+      "rate": "163.15",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "KWD",
+      "to": "JPY",
+      "rate": "489.11",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "JPY",
+      "to": "KWD",
+      "rate": "0.0020445",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "USD",
+      "to": "KWD",
+      "rate": "0.30746",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    },
+    {
+      "from": "EUR",
+      "to": "KWD",
+      "rate": "0.33358",
+      "source": "static-seed",
+      "asOf": "2026-11-02T00:00:00Z"
+    }
+  ]
+}
