@@ -81,7 +81,7 @@ Topic `treasury.program-capacity.v1` (key = `programId`), DLQ `treasury.program-
   "reservations": [{ "invoiceId": "TRE-1", "invoiceAmount": "2000000", "invoiceCurrency": "EUR", "bookedAmount": "2170000" }] }
 ```
 
-`bookedAmount` is treasury's outstanding utilisation for the invoice in programme currency.
+`bookedAmount` is treasury's outstanding utilisation for the invoice in programme currency; `"0"` is valid (an open invoice with no remaining exposure).
 
 ## Development
 
@@ -122,7 +122,7 @@ Tests: unit and property tests for money, FX, release allocation, ordering and e
 
   Discrepancies stay open until a later snapshot no longer reports them.
 
-- **Auth**: RS256 JWT verified with `jose` (`iss`, `aud`, `exp`, `sub` required; RS256 only) in a global guard; routes without a declared scope are denied. Request bodies are parsed only after authentication; an unreachable JWKS endpoint is a 503, not a 401. Callers are trusted internal services: no per-programme authorisation. Production would use the IdP's JWKS (`JWT_JWKS_URL`).
+- **Auth**: RS256 JWT verified with `jose` (`iss`, `aud`, `exp`, `sub` required; RS256 only) in a global guard; routes without a declared scope are denied. Request bodies are read (64 kB, strict UTF-8) and parsed only after authentication; an unreachable or stalled JWKS endpoint is a 503, not a 401. Callers are trusted internal services: no per-programme authorisation. Production would use the IdP's JWKS (`JWT_JWKS_URL`).
 - **Programmes** are created by treasury (`ProgramLimitSet` or `ProgramSnapshot`) or the local seed; there is no HTTP endpoint for them.
 - **Real-time** availability is served by polling `GET /capacity`; `version` changes on every capacity mutation.
 

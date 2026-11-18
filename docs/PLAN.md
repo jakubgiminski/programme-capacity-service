@@ -233,5 +233,6 @@ Each step ends with green lint, typecheck and tests, conventional commits, and a
 - Connections set `lock_timeout` (10 s) and `statement_timeout` (60 s); HTTP maps those timeouts to 503.
 - A snapshot's limit change is ledgered as `LIMIT_SET` (reason `SNAPSHOT_LIMIT`); reservation adjustments as `RECONCILE_ADJUST`.
 - Release rows store the reservation state they produced (`sequence`, `status_after`, `invoice_released_after_minor`, `booked_after_minor`, `released_after_minor`), so an idempotent replay returns the original response even after later releases. `RELEASED` means the full invoice amount has been repaid. Migration 0001 was amended in place (pre-release).
-- HTTP bodies are read as raw buffers and parsed as JSON by the route after the auth guard runs; non-JSON or non-UTF-8 bodies are 415, bodies over 64 kB are 413.
+- HTTP bodies are read by a global interceptor (after the auth guard) and parsed as JSON by the route. Non-JSON media types and non-UTF-8 charsets get 415, bodies over 64 kB get 413, and invalid UTF-8 gets 400.
+- Snapshot `bookedAmount` may be `0`, so treasury reservations may have zero booked exposure; API reservations still require a positive booking.
 - `/health` returns a 503 problem document (with `checks`) when a dependency is down; an unreachable JWKS endpoint is a 503 `authentication-unavailable` problem rather than a 401.
