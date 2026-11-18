@@ -10,6 +10,7 @@ describe('currency', () => {
     ['KWD', 3],
     ['BHD', 3],
     ['CLF', 4],
+    ['XCG', 2],
   ])('knows the ISO 4217 exponent of %s', (code, exponent) => {
     expect(currencyExponent(parseCurrency(code))).toBe(exponent);
   });

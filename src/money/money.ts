@@ -18,11 +18,14 @@ export function assertInt64(value: bigint): bigint {
   return value;
 }
 
+const MAX_INT64_DIGITS = 19;
+
 export function parseMinorUnits(value: string): bigint {
+  if (value.length > MAX_INT64_DIGITS) {
+    throw new AmountOutOfRangeError('Amount is outside the supported 64-bit range');
+  }
   if (!NON_NEGATIVE_INTEGER.test(value)) {
-    throw new InvalidAmountError(
-      `Amount must be a non-negative integer string in minor units, got "${value}"`,
-    );
+    throw new InvalidAmountError('Amount must be a non-negative integer string in minor units');
   }
   return assertInt64(BigInt(value));
 }
@@ -31,7 +34,9 @@ export class Money {
   private constructor(
     readonly minor: bigint,
     readonly currency: CurrencyCode,
-  ) {}
+  ) {
+    Object.freeze(this);
+  }
 
   static of(minor: bigint, currency: CurrencyCode): Money {
     return new Money(assertInt64(minor), currency);
@@ -63,7 +68,8 @@ export class Money {
   }
 
   equals(other: Money): boolean {
-    return this.currency === other.currency && this.minor === other.minor;
+    this.assertSameCurrency(other);
+    return this.minor === other.minor;
   }
 
   isZero(): boolean {

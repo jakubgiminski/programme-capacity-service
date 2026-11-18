@@ -21,6 +21,8 @@ describe('Money', () => {
     a.add(Money.of(1n, USD));
 
     expect(a.minor).toBe(100n);
+    expect(Object.isFrozen(a)).toBe(true);
+    expect(() => Object.assign(a, { minor: INT64_MAX + 1n })).toThrow(TypeError);
   });
 
   it('refuses to mix currencies', () => {
@@ -30,7 +32,8 @@ describe('Money', () => {
     expect(() => usd.add(eur)).toThrow(CurrencyMismatchError);
     expect(() => usd.subtract(eur)).toThrow(CurrencyMismatchError);
     expect(() => usd.compare(eur)).toThrow(CurrencyMismatchError);
-    expect(usd.equals(eur)).toBe(false);
+    expect(() => usd.equals(eur)).toThrow(CurrencyMismatchError);
+    expect(usd.equals(Money.of(1n, USD))).toBe(true);
   });
 
   it('compares amounts', () => {
@@ -72,7 +75,8 @@ describe('parseMinorUnits', () => {
     expect(() => parseMinorUnits(input)).toThrow(InvalidAmountError);
   });
 
-  it('rejects values beyond the BIGINT range', () => {
+  it('rejects values beyond the BIGINT range, including very long strings', () => {
     expect(() => parseMinorUnits('9223372036854775808')).toThrow(AmountOutOfRangeError);
+    expect(() => parseMinorUnits('9'.repeat(10_000))).toThrow(AmountOutOfRangeError);
   });
 });

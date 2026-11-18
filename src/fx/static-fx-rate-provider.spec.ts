@@ -29,6 +29,16 @@ describe('StaticFxRateProvider', () => {
     });
   });
 
+  it('returns defensive copies so callers cannot alter later quotes', async () => {
+    const first = await provider.getRate(EUR, USD);
+    first?.asOf.setTime(0);
+
+    const second = await provider.getRate(EUR, USD);
+
+    expect(second?.asOf).toEqual(new Date('2026-11-02T00:00:00Z'));
+    expect(Object.isFrozen(second)).toBe(true);
+  });
+
   it('does not derive inverse or cross rates', async () => {
     await expect(provider.getRate(USD, EUR)).resolves.toBeNull();
     await expect(provider.getRate(JPY, USD)).resolves.toBeNull();

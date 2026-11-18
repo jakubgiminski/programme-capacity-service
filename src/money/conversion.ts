@@ -1,5 +1,5 @@
 import { currencyExponent } from './currency';
-import { type FxRate, FX_RATE_SCALE } from './fx-rate';
+import { assertValidScaledRate, type FxRate, FX_RATE_SCALE } from './fx-rate';
 import { Money } from './money';
 import { CurrencyMismatchError, InvalidAmountError } from './money-errors';
 import { divide, type RoundingMode } from './rounding';
@@ -8,6 +8,7 @@ export function convert(amount: Money, rate: FxRate, mode: RoundingMode): Money 
   if (amount.currency !== rate.from) {
     throw new CurrencyMismatchError(rate.from, amount.currency);
   }
+  assertValidScaledRate(rate.scaled);
   if (amount.isNegative()) {
     throw new InvalidAmountError('Only non-negative amounts can be converted');
   }

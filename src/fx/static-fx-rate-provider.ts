@@ -58,13 +58,18 @@ export class StaticFxRateProvider implements FxRateProvider {
     rates: readonly FxRate[],
     private readonly clock: () => Date = () => new Date(),
   ) {
-    this.rates = new Map(rates.map((rate) => [pairKey(rate.from, rate.to), rate]));
+    this.rates = new Map(rates.map((rate) => [pairKey(rate.from, rate.to), copyRate(rate)]));
   }
 
   getRate(from: CurrencyCode, to: CurrencyCode): Promise<FxRate | null> {
     if (from === to) {
       return Promise.resolve(identityRate(from, this.clock()));
     }
-    return Promise.resolve(this.rates.get(pairKey(from, to)) ?? null);
+    const rate = this.rates.get(pairKey(from, to));
+    return Promise.resolve(rate === undefined ? null : copyRate(rate));
   }
+}
+
+function copyRate(rate: FxRate): FxRate {
+  return Object.freeze({ ...rate, asOf: new Date(rate.asOf.getTime()) });
 }

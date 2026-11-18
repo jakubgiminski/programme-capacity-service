@@ -20,8 +20,16 @@ describe('FX rate parsing', () => {
     },
   );
 
-  it('rejects rates that do not fit in BIGINT once scaled', () => {
+  it('rejects rates that do not fit in BIGINT once scaled and oversized input', () => {
     expect(() => parseFxRate('1000000000')).toThrow(InvalidFxRateError);
+    expect(() => parseFxRate('9'.repeat(10_000))).toThrow(InvalidFxRateError);
+    expect(parseFxRate('922337203.6854775807')).toBe(9_223_372_036_854_775_807n);
+    expect(() => parseFxRate('922337203.6854775808')).toThrow(InvalidFxRateError);
+  });
+
+  it('refuses to format a non-positive scaled rate', () => {
+    expect(() => formatFxRate(0n)).toThrow(InvalidFxRateError);
+    expect(() => formatFxRate(-1n)).toThrow(InvalidFxRateError);
   });
 
   it('formats scaled rates without trailing zeros', () => {
