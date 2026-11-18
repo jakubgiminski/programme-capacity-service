@@ -79,6 +79,16 @@ export interface OpenDiscrepancy {
   readonly lastSeenAt: Date;
 }
 
+export interface DiscrepancyCursor {
+  readonly invoiceId: string;
+  readonly kind: DiscrepancyKind;
+}
+
+export interface DiscrepancyPage {
+  readonly limit: number;
+  readonly after: DiscrepancyCursor | null;
+}
+
 export interface SnapshotReference {
   readonly messageId: string;
   readonly revision: bigint;
@@ -347,15 +357,23 @@ export class TreasuryRepository {
     return Number(row.count);
   }
 
-  async listOpenDiscrepancies(db: Executor, programId: string): Promise<OpenDiscrepancy[]> {
-    const rows = await db
+  async listOpenDiscrepancies(
+    db: Executor,
+    programId: string,
+    page: DiscrepancyPage,
+  ): Promise<OpenDiscrepancy[]> {
+    const { after } = page;
+    let query = db
       .selectFrom('reconciliation_discrepancies')
       .selectAll()
       .where('program_id', '=', programId)
-      .where('resolved_at', 'is', null)
-      .orderBy('invoice_id')
-      .orderBy('kind')
-      .execute();
+      .where('resolved_at', 'is', null);
+    if (after !== null) {
+      query = query.where((eb) =>
+        eb(eb.refTuple('invoice_id', 'kind'), '>', eb.tuple(after.invoiceId, after.kind)),
+      );
+    }
+    const rows = await query.orderBy('invoice_id').orderBy('kind').limit(page.limit).execute();
     return rows.map((row) => ({
       id: row.id,
       programId: row.program_id,

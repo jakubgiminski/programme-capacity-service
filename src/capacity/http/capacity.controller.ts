@@ -1,4 +1,4 @@
-import { Controller, Get, HttpStatus, Inject, Param, Post, Res } from '@nestjs/common';
+import { Controller, Get, HttpStatus, Inject, Param, Post, Query, Res } from '@nestjs/common';
 import { type Response } from 'express';
 import { Scope } from '../../auth/principal';
 import { RequireScope } from '../../auth/require-scope.decorator';
@@ -18,6 +18,9 @@ import {
 import { RequestActor } from './request-actor.decorator';
 import { identifierSchema } from '../domain/identifier';
 import {
+  type DiscrepancyQuery,
+  discrepancyQuerySchema,
+  encodeCursor,
   type ReleaseBody,
   releaseBodySchema,
   type ReserveBody,
@@ -25,6 +28,7 @@ import {
 } from './request-schemas';
 
 const idPipe = new ZodValidationPipe(identifierSchema);
+const discrepancyQueryPipe = new ZodValidationPipe(discrepancyQuerySchema);
 
 @Controller('v1/programs/:programId')
 export class CapacityController {
@@ -42,11 +46,15 @@ export class CapacityController {
 
   @Get('discrepancies')
   @RequireScope(Scope.Read)
-  async getDiscrepancies(@Param('programId', idPipe) programId: string) {
-    const list = await this.queries.listOpenDiscrepancies(programId);
+  async getDiscrepancies(
+    @Param('programId', idPipe) programId: string,
+    @Query(discrepancyQueryPipe) query: DiscrepancyQuery,
+  ) {
+    const list = await this.queries.listOpenDiscrepancies(programId, query);
     return {
       programId,
       discrepancies: list.discrepancies.map((item) => presentDiscrepancy(list.program, item)),
+      nextCursor: list.next === null ? null : encodeCursor(list.next),
     };
   }
 

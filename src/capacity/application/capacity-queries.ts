@@ -5,10 +5,14 @@ import { admissionLimitMinor } from '../domain/capacity-rules';
 import { type Program, type Release, type Reservation } from '../domain/model';
 import { CapacityRepository } from '../infrastructure/capacity.repository';
 import {
+  type DiscrepancyCursor,
+  type DiscrepancyPage,
   type OpenDiscrepancy,
   type StreamStatus,
   TreasuryRepository,
 } from '../infrastructure/treasury.repository';
+
+const FIRST_PAGE: DiscrepancyPage = { limit: 100, after: null };
 
 export interface CapacityView {
   readonly program: Program;
@@ -21,6 +25,7 @@ export interface CapacityView {
 export interface DiscrepancyList {
   readonly program: Program;
   readonly discrepancies: OpenDiscrepancy[];
+  readonly next: DiscrepancyCursor | null;
 }
 
 export interface ReservationDetails {
@@ -56,13 +61,26 @@ export class CapacityQueries {
     });
   }
 
-  listOpenDiscrepancies(programId: string): Promise<DiscrepancyList> {
+  listOpenDiscrepancies(programId: string, page = FIRST_PAGE): Promise<DiscrepancyList> {
     return this.snapshot(async (trx) => {
       const program = await this.repository.findProgram(trx, programId);
       if (program === null) {
         throw new ProgramNotFoundError(programId);
       }
-      return { program, discrepancies: await this.treasury.listOpenDiscrepancies(trx, programId) };
+      const rows = await this.treasury.listOpenDiscrepancies(trx, programId, {
+        limit: page.limit + 1,
+        after: page.after,
+      });
+      const discrepancies = rows.slice(0, page.limit);
+      const last = discrepancies.at(-1);
+      return {
+        program,
+        discrepancies,
+        next:
+          rows.length > page.limit && last !== undefined
+            ? { invoiceId: last.invoiceId, kind: last.kind }
+            : null,
+      };
     });
   }
 

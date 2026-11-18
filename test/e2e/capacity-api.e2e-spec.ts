@@ -455,6 +455,56 @@ describe('Capacity HTTP API (e2e)', () => {
     });
   });
 
+  describe('discrepancies', () => {
+    it('pages open discrepancies with an opaque cursor', async () => {
+      const programId = await newProgram();
+      await database.db
+        .insertInto('reconciliation_discrepancies')
+        .values(
+          ['INV-3', 'INV-1', 'INV-2'].map((invoiceId) => ({
+            program_id: programId,
+            invoice_id: invoiceId,
+            kind: 'MISSING_FROM_SNAPSHOT' as const,
+            local_status: 'ACTIVE',
+            local_outstanding_minor: 100n,
+            treasury_outstanding_minor: null,
+            detail: 'kept the local amount',
+            snapshot_message_id: 'snap-1',
+            snapshot_revision: 1n,
+          })),
+        )
+        .execute();
+      const page = (query: Record<string, string>) =>
+        request(server)
+          .get(`/v1/programs/${programId}/discrepancies`)
+          .query(query)
+          .set('Authorization', `Bearer ${writeToken}`);
+
+      const first = await page({ limit: '2' });
+      const second = await page({ limit: '2', after: String(first.body.nextCursor) });
+      const invalid = await page({ after: 'not-a-cursor' });
+      const unknown = await page({ sort: 'desc' });
+
+      expect(first.status).toBe(200);
+      const invoices = (first.body as { discrepancies: { invoiceId: string }[] }).discrepancies.map(
+        (item) => item.invoiceId,
+      );
+      expect(invoices).toEqual(['INV-1', 'INV-2']);
+      expect(first.body.discrepancies[0]).toMatchObject({
+        kind: 'MISSING_FROM_SNAPSHOT',
+        localOutstanding: { amount: '100', currency: 'USD' },
+        treasuryOutstanding: null,
+        snapshotRevision: '1',
+      });
+      expect(second.body).toMatchObject({
+        discrepancies: [expect.objectContaining({ invoiceId: 'INV-3' })],
+        nextCursor: null,
+      });
+      expect(invalid.status).toBe(400);
+      expect(unknown.status).toBe(400);
+    });
+  });
+
   describe('unavailable dependencies', () => {
     it('returns a 503 problem document when the database is unreachable', async () => {
       const offline = await createTestApp(database, {
