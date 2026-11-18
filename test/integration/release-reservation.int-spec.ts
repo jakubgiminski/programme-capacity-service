@@ -147,7 +147,8 @@ describe('ReleaseReservation (Postgres)', () => {
       invoiceReleasedAfterMinor: 1n,
       releasedAfterMinor: 333n,
     });
-    expect(replay.reservation.status).toBe('RELEASED');
+    expect(replay.reservation).toEqual(first.reservation);
+    expect(replay.reservation).toMatchObject({ status: 'PARTIALLY_RELEASED', releasedMinor: 333n });
   });
 
   it('rejects a zero release amount without writing anything', async () => {

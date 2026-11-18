@@ -12,6 +12,7 @@ import {
 } from '../capacity/domain/errors';
 import {
   MalformedRequestError,
+  PayloadTooLargeError,
   type Problem,
   problemType,
   RequestValidationError,
@@ -104,6 +105,14 @@ export function toProblem(error: unknown): Problem {
       type: problemType('malformed-request'),
       title: titleFor(400),
       status: 400,
+      detail: error.message,
+    };
+  }
+  if (error instanceof PayloadTooLargeError) {
+    return {
+      type: problemType('payload-too-large'),
+      title: titleFor(413),
+      status: 413,
       detail: error.message,
     };
   }

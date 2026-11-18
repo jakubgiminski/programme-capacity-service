@@ -41,7 +41,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       invoice_currency char(3) NOT NULL,
       invoice_released_minor bigint NOT NULL DEFAULT 0
         CHECK (invoice_released_minor >= 0 AND invoice_released_minor <= invoice_amount_minor),
-      booked_minor bigint NOT NULL CHECK (booked_minor > 0),
+      booked_minor bigint NOT NULL CHECK (booked_minor >= 0),
       released_minor bigint NOT NULL DEFAULT 0
         CHECK (released_minor >= 0 AND released_minor <= booked_minor),
       allocation_base_invoice_minor bigint NOT NULL DEFAULT 0
@@ -64,7 +64,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           (fx_rate IS NULL AND fx_scale IS NULL AND fx_source IS NULL AND fx_as_of IS NULL)
           OR (fx_rate IS NOT NULL AND fx_scale IS NOT NULL AND fx_source IS NOT NULL AND fx_as_of IS NOT NULL)
         ),
-      CONSTRAINT reservations_api_has_fx_snapshot CHECK (origin <> 'API' OR fx_rate IS NOT NULL)
+      CONSTRAINT reservations_api_has_fx_snapshot CHECK (origin <> 'API' OR fx_rate IS NOT NULL),
+      CONSTRAINT reservations_api_books_capacity CHECK (origin <> 'API' OR booked_minor > 0)
     )
   `.execute(db);
 
@@ -86,7 +87,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       sequence bigint NOT NULL CHECK (sequence > 0),
       status_after text NOT NULL CHECK (status_after IN ('PARTIALLY_RELEASED', 'RELEASED')),
       invoice_released_after_minor bigint NOT NULL CHECK (invoice_released_after_minor > 0),
-      booked_after_minor bigint NOT NULL CHECK (booked_after_minor > 0),
+      booked_after_minor bigint NOT NULL CHECK (booked_after_minor >= 0),
       released_after_minor bigint NOT NULL CHECK (released_after_minor >= 0),
       created_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT releases_reservation_release_unique UNIQUE (reservation_id, release_id),

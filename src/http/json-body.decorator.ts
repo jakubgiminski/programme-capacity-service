@@ -1,21 +1,40 @@
 import { createParamDecorator, type ExecutionContext } from '@nestjs/common';
+import { parse as parseContentType } from 'content-type';
 import { type Request } from 'express';
 import { type z } from 'zod';
 import { MalformedRequestError, UnsupportedMediaTypeError } from './problem';
 import { ZodValidationPipe } from './zod-validation.pipe';
 
-const CHARSET = /;\s*charset\s*=\s*"?([^";\s]+)"?/i;
+const UTF8 = new Set(['utf-8', 'utf8']);
 
-function readJson(request: Request): unknown {
-  if (request.is('application/json') === false || request.is('application/json') === null) {
+function assertJsonMediaType(request: Request): void {
+  let parsed: ReturnType<typeof parseContentType>;
+  try {
+    parsed = parseContentType(request);
+  } catch {
     throw new UnsupportedMediaTypeError('Request body must be application/json');
   }
-  const charset = CHARSET.exec(request.headers['content-type'] ?? '')?.[1]?.toLowerCase();
-  if (charset !== undefined && charset !== 'utf-8' && charset !== 'utf8') {
+  if (parsed.type !== 'application/json') {
+    throw new UnsupportedMediaTypeError('Request body must be application/json');
+  }
+  const charset = parsed.parameters.charset;
+  if (charset !== undefined && !UTF8.has(charset.toLowerCase())) {
     throw new UnsupportedMediaTypeError('Request body must be UTF-8 encoded JSON');
   }
-  const body: unknown = request.body;
-  const text = Buffer.isBuffer(body) ? body.toString('utf8') : '';
+}
+
+function decodeUtf8(body: unknown): string {
+  const bytes = Buffer.isBuffer(body) ? body : Buffer.alloc(0);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new MalformedRequestError('Request body is not valid UTF-8');
+  }
+}
+
+function readJson(request: Request): unknown {
+  assertJsonMediaType(request);
+  const text = decodeUtf8(request.body);
   try {
     return JSON.parse(text) as unknown;
   } catch {

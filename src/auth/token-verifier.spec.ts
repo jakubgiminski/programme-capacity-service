@@ -74,4 +74,23 @@ describe('TokenVerifier with a remote JWKS', () => {
       KeyServiceUnavailableError,
     );
   });
+
+  it('times out a key set whose response body stalls', async () => {
+    const stalled = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.write('{"keys":');
+    });
+    const stalledUrl = await listen(stalled);
+    const verifier = new TokenVerifier(remoteKeySet(stalledUrl, 200), ISSUER, AUDIENCE);
+    const started = Date.now();
+    try {
+      await expect(verifier.verify(await sign(privateKey, 'key-1'))).rejects.toBeInstanceOf(
+        KeyServiceUnavailableError,
+      );
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      stalled.closeAllConnections();
+      await new Promise((resolve) => stalled.close(resolve));
+    }
+  });
 });

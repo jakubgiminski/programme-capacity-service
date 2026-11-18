@@ -127,14 +127,14 @@ describe('parseTreasuryMessage', () => {
       },
     ],
     [
-      'a snapshot with a zero booked amount',
+      'a snapshot with a negative booked amount',
       {
         type: 'ProgramSnapshot',
         currency: 'USD',
         limit: '100',
         asOf: '2026-11-18T09:00:00Z',
         reservations: [
-          { invoiceId: 'A', invoiceAmount: '1', invoiceCurrency: 'USD', bookedAmount: '0' },
+          { invoiceId: 'A', invoiceAmount: '1', invoiceCurrency: 'USD', bookedAmount: '-1' },
         ],
       },
     ],

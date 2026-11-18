@@ -31,6 +31,7 @@ type Operation =
   | { kind: 'snapshot'; limit: bigint; entries: { invoice: number; booked: bigint }[] };
 
 interface ModelReservation {
+  origin: 'API' | 'TREASURY';
   currency: CurrencyCode;
   invoiceAmount: bigint;
   booked: bigint;
@@ -84,6 +85,7 @@ function expectReserve(
     return { outcome: 'rejected', error: InsufficientCapacityError };
   }
   model.reservations.set(invoiceId, {
+    origin: 'API',
     currency,
     invoiceAmount: amount,
     booked,
@@ -145,35 +147,97 @@ function cumulativeFreed(reservation: ModelReservation, cumulativeInvoice: bigin
   return share;
 }
 
-async function resyncFromDatabase(db: Db, programId: string, model: Model): Promise<void> {
-  const program = await db
-    .selectFrom('programs')
-    .select(['limit_minor', 'utilised_minor'])
-    .where('id', '=', programId)
-    .executeTakeFirstOrThrow();
-  model.limit = program.limit_minor;
-  model.utilised = program.utilised_minor;
+interface ModelSnapshotEntry {
+  invoiceId: string;
+  invoiceAmount: bigint;
+  currency: CurrencyCode;
+  booked: bigint;
+}
+
+function isOpen(reservation: ModelReservation): boolean {
+  return reservation.invoiceReleased < reservation.invoiceAmount;
+}
+
+function rebook(reservation: ModelReservation, treasuryOutstanding: bigint): void {
+  reservation.booked = reservation.released + treasuryOutstanding;
+  reservation.baseInvoiceReleased = reservation.invoiceReleased;
+  reservation.baseReleased = reservation.released;
+}
+
+function applyModelSnapshot(model: Model, limit: bigint, entries: ModelSnapshotEntry[]): void {
+  model.limit = limit;
+  const reported = new Set(entries.map((entry) => entry.invoiceId));
+  for (const entry of entries) {
+    const reservation = model.reservations.get(entry.invoiceId);
+    if (reservation === undefined) {
+      model.reservations.set(entry.invoiceId, {
+        origin: 'TREASURY',
+        currency: entry.currency,
+        invoiceAmount: entry.invoiceAmount,
+        booked: entry.booked,
+        released: 0n,
+        invoiceReleased: 0n,
+        baseInvoiceReleased: 0n,
+        baseReleased: 0n,
+        releases: new Map(),
+      });
+      continue;
+    }
+    if (!isOpen(reservation)) {
+      continue;
+    }
+    const outstanding = reservation.booked - reservation.released;
+    if (entry.booked > outstanding) {
+      rebook(reservation, entry.booked);
+      continue;
+    }
+    if (entry.booked < outstanding && reservation.origin === 'TREASURY') {
+      rebook(reservation, entry.booked);
+    }
+  }
+  for (const [invoiceId, reservation] of model.reservations) {
+    if (reported.has(invoiceId) || !isOpen(reservation) || reservation.origin === 'API') {
+      continue;
+    }
+    reservation.released = reservation.booked;
+    reservation.invoiceReleased = reservation.invoiceAmount;
+  }
+  model.utilised = [...model.reservations.values()]
+    .filter(isOpen)
+    .reduce((sum, reservation) => sum + reservation.booked - reservation.released, 0n);
+}
+
+async function expectReservationsMatch(db: Db, programId: string, model: Model): Promise<void> {
   const rows = await db
     .selectFrom('reservations')
     .selectAll()
     .where('program_id', '=', programId)
+    .orderBy('invoice_id')
     .execute();
-  for (const row of rows) {
-    const known = model.reservations.get(row.invoice_id);
-    model.reservations.set(row.invoice_id, {
-      currency: row.invoice_currency as CurrencyCode,
-      invoiceAmount: row.invoice_amount_minor,
-      booked: row.booked_minor,
-      released: row.released_minor,
-      invoiceReleased: row.invoice_released_minor,
-      baseInvoiceReleased: row.allocation_base_invoice_minor,
-      baseReleased: row.allocation_base_released_minor,
-      releases: known?.releases ?? new Map(),
-    });
-  }
+  const actual = rows.map((row) => ({
+    invoiceId: row.invoice_id,
+    origin: row.origin,
+    booked: row.booked_minor,
+    released: row.released_minor,
+    invoiceReleased: row.invoice_released_minor,
+    baseInvoiceReleased: row.allocation_base_invoice_minor,
+    baseReleased: row.allocation_base_released_minor,
+  }));
+  const expected = [...model.reservations.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([invoiceId, reservation]) => ({
+      invoiceId,
+      origin: reservation.origin,
+      booked: reservation.booked,
+      released: reservation.released,
+      invoiceReleased: reservation.invoiceReleased,
+      baseInvoiceReleased: reservation.baseInvoiceReleased,
+      baseReleased: reservation.baseReleased,
+    }));
+  expect(actual).toEqual(expected);
 }
 
-const invoiceArb = fc.integer({ min: 0, max: 8 });
+const invoiceArb = fc.integer({ min: 0, max: 4 });
 
 const operationArb: fc.Arbitrary<Operation> = fc.oneof(
   {
@@ -208,8 +272,8 @@ const operationArb: fc.Arbitrary<Operation> = fc.oneof(
       limit: fc.bigInt({ min: 0n, max: 2_000_000n }),
       entries: fc.uniqueArray(
         fc.record({
-          invoice: fc.integer({ min: 0, max: 8 }),
-          booked: fc.bigInt({ min: 1n, max: 300_000n }),
+          invoice: invoiceArb,
+          booked: fc.bigInt({ min: 0n, max: 300_000n }),
         }),
         { selector: (entry) => entry.invoice, maxLength: 6 },
       ),
@@ -253,6 +317,18 @@ describe('capacity properties (Postgres)', () => {
             if (operation.kind === 'limit' || operation.kind === 'snapshot') {
               revision += 1;
               const messageId = `${programId}-${revision}`;
+              const entries: ModelSnapshotEntry[] =
+                operation.kind === 'limit'
+                  ? []
+                  : operation.entries.map((entry) => {
+                      const local = model.reservations.get(`INV-${entry.invoice}`);
+                      return {
+                        invoiceId: `INV-${entry.invoice}`,
+                        invoiceAmount: local?.invoiceAmount ?? entry.booked + 1n,
+                        currency: local?.currency ?? USD,
+                        booked: entry.booked,
+                      };
+                    });
               const message =
                 operation.kind === 'limit'
                   ? limitSet(messageId, programId, revision, operation.limit.toString())
@@ -261,19 +337,25 @@ describe('capacity properties (Postgres)', () => {
                       programId,
                       revision,
                       operation.limit.toString(),
-                      operation.entries.map((entry) => {
-                        const local = model.reservations.get(`INV-${entry.invoice}`);
-                        return {
-                          invoiceId: `INV-${entry.invoice}`,
-                          invoiceAmount: (local?.invoiceAmount ?? entry.booked).toString(),
-                          invoiceCurrency: local?.currency ?? 'USD',
-                          bookedAmount: entry.booked.toString(),
-                        };
-                      }),
+                      entries.map((entry) => ({
+                        invoiceId: entry.invoiceId,
+                        invoiceAmount: entry.invoiceAmount.toString(),
+                        invoiceCurrency: entry.currency,
+                        bookedAmount: entry.booked.toString(),
+                      })),
                     );
               const result = await services.treasury.execute(inbound(message));
               expect(result.outcome).toBe('APPLIED');
-              await resyncFromDatabase(database.db, programId, model);
+              if (operation.kind === 'limit') {
+                model.limit = operation.limit;
+              }
+              if (operation.kind === 'snapshot') {
+                applyModelSnapshot(model, operation.limit, entries);
+              }
+              const after = await programState(database.db, programId);
+              expect(after.limitMinor).toBe(model.limit);
+              expect(after.utilisedMinor).toBe(model.utilised);
+              await expectReservationsMatch(database.db, programId, model);
               await expectInvariants(database.db, programId);
               continue;
             }
@@ -345,11 +427,12 @@ describe('capacity properties (Postgres)', () => {
             const after = await programState(database.db, programId);
             expect(after.utilisedMinor).toBe(model.utilised);
             expect(after.limitMinor).toBe(model.limit);
+            await expectReservationsMatch(database.db, programId, model);
             await expectInvariants(database.db, programId);
           }
         },
       ),
-      { numRuns: 40 },
+      { numRuns: 200 },
     );
   });
 });

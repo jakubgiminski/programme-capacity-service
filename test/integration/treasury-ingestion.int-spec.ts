@@ -505,6 +505,33 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
     await expectInvariants(database.db, id);
   });
 
+  it('accepts zero treasury exposure for open and new treasury invoices', async () => {
+    const id = nextProgramId();
+    const entry = { invoiceId: 'TRE-1', invoiceAmount: '100', invoiceCurrency: 'USD' };
+    await apply(snapshot(`${id}-1`, id, 1, '100000', [{ ...entry, bookedAmount: '100' }]));
+    await apply(
+      invoiceRepaid(`${id}-2`, id, 2, 'TRE-1', 'TR-1', { amount: '50', currency: 'USD' }),
+    );
+
+    const zero = await apply(
+      snapshot(`${id}-3`, id, 3, '100000', [
+        { ...entry, bookedAmount: '0' },
+        { invoiceId: 'TRE-2', invoiceAmount: '40', invoiceCurrency: 'USD', bookedAmount: '0' },
+      ]),
+    );
+    const final = await apply(invoiceRepaid(`${id}-4`, id, 4, 'TRE-1', 'TR-2'));
+    const other = await apply(invoiceRepaid(`${id}-5`, id, 5, 'TRE-2', 'TR-3'));
+
+    expect([zero.outcome, final.outcome, other.outcome]).toEqual(['APPLIED', 'APPLIED', 'APPLIED']);
+    const first = await services.queries.getReservation(id, 'TRE-1');
+    expect(first.reservation).toMatchObject({ status: 'RELEASED', bookedMinor: 50n });
+    expect(first.releases.map((release) => release.freedMinor)).toEqual([50n, 0n]);
+    const second = await services.queries.getReservation(id, 'TRE-2');
+    expect(second.reservation).toMatchObject({ status: 'RELEASED', bookedMinor: 0n });
+    expect((await services.queries.getCapacity(id)).program.utilisedMinor).toBe(0n);
+    await expectInvariants(database.db, id);
+  });
+
   it('imports a snapshot whose ledger insert exceeds the bind-parameter limit', async () => {
     const id = nextProgramId();
     const entries = Array.from({ length: 7_000 }, (_, index) => ({

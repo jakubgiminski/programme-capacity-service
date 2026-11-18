@@ -65,11 +65,32 @@ function parseScopes(payload: JWTPayload): ReadonlySet<string> {
 
 const JWKS_TIMEOUT_MS = 5_000;
 
-export function remoteKeySet(url: URL): JWTVerifyGetKey {
-  const jwks = createRemoteJWKSet(url, { timeoutDuration: JWKS_TIMEOUT_MS });
+class KeySetTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`JWKS did not respond within ${String(timeoutMs)} ms`);
+    this.name = 'KeySetTimeoutError';
+  }
+}
+
+async function withDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new KeySetTimeoutError(timeoutMs));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function remoteKeySet(url: URL, timeoutMs = JWKS_TIMEOUT_MS): JWTVerifyGetKey {
+  const jwks = createRemoteJWKSet(url, { timeoutDuration: timeoutMs });
   return async (header, token) => {
     try {
-      return await jwks(header, token);
+      return await withDeadline(jwks(header, token), timeoutMs);
     } catch (error) {
       if (
         error instanceof errors.JWKSNoMatchingKey ||

@@ -42,7 +42,7 @@ const snapshotReservationSchema = z.strictObject({
   invoiceId: identifierSchema,
   invoiceAmount: positiveMinorUnitsSchema,
   invoiceCurrency: currencySchema,
-  bookedAmount: positiveMinorUnitsSchema,
+  bookedAmount: nonNegativeMinorUnitsSchema,
 });
 
 const programSnapshotSchema = z

@@ -279,12 +279,61 @@ describe('Capacity HTTP API (e2e)', () => {
     });
 
     it('authenticates before reading the request body', async () => {
-      const response = await request(server)
-        .post('/v1/programs/PRG-1/reservations')
-        .set('Content-Type', 'application/json')
-        .send('{"invoiceId":');
+      const oversized = `{"invoiceId":"${'x'.repeat(70_000)}"}`;
+      const send = (body: string, headers: Record<string, string>) =>
+        request(server)
+          .post('/v1/programs/PRG-1/reservations')
+          .set({ 'Content-Type': 'application/json', ...headers })
+          .send(body);
+      const authorization = { Authorization: `Bearer ${writeToken}` };
 
-      expect(response.status).toBe(401);
+      const malformed = await send('{"invoiceId":', {});
+      const tooLargeAnonymous = await send(oversized, {});
+      const encodedAnonymous = await send('{}', { 'Content-Encoding': 'compress' });
+      const tooLarge = await send(oversized, authorization);
+      const encoded = await send('{}', { 'Content-Encoding': 'compress', ...authorization });
+
+      expect(malformed.status).toBe(401);
+      expect(tooLargeAnonymous.status).toBe(401);
+      expect(encodedAnonymous.status).toBe(401);
+      expect(tooLarge.status).toBe(413);
+      expect(tooLarge.body.type).toBe('/problems/payload-too-large');
+      expect(encoded.status).toBe(415);
+      expect(encoded.body.type).toBe('/problems/unsupported-media-type');
+    });
+
+    it('decodes bodies as strict UTF-8 and parses media type parameters structurally', async () => {
+      const programId = await newProgram();
+      const path = `/v1/programs/${programId}/reservations`;
+      const json = (invoiceId: string) =>
+        `{"invoiceId":"${invoiceId}","amount":{"amount":"100","currency":"USD"}}`;
+
+      const quoted = await request(server)
+        .post(path)
+        .set('Authorization', `Bearer ${writeToken}`)
+        .set('Content-Type', 'application/json; note="v1; charset=latin1"; charset=utf-8')
+        .send(json('INV-Q'));
+      const withBom = await request(server)
+        .post(path)
+        .set('Authorization', `Bearer ${writeToken}`)
+        .set('Content-Type', 'application/json')
+        .send(`\uFEFF${json('INV-BOM')}`);
+      const invalid = await request(server)
+        .post(path)
+        .set('Authorization', `Bearer ${writeToken}`)
+        .set('Content-Type', 'application/json')
+        .serialize((body: Buffer) => body as unknown as string)
+        .send(
+          Buffer.concat([Buffer.from('{"invoiceId":"'), Buffer.from([0xff]), Buffer.from('"}')]),
+        );
+
+      expect(quoted.status).toBe(201);
+      expect(withBom.status).toBe(201);
+      expect(invalid.status).toBe(400);
+      expect(invalid.body).toMatchObject({
+        type: '/problems/malformed-request',
+        detail: 'Request body is not valid UTF-8',
+      });
     });
 
     it.each([

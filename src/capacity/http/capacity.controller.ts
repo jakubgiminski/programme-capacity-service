@@ -17,7 +17,6 @@ import {
 } from './presenters';
 import { RequestActor } from './request-actor.decorator';
 import { identifierSchema } from '../domain/identifier';
-import { reservationAfterRelease } from '../domain/model';
 import {
   type ReleaseBody,
   releaseBodySchema,
@@ -103,10 +102,7 @@ export class CapacityController {
     response.status(result.created ? HttpStatus.CREATED : HttpStatus.OK);
     return {
       ...presentRelease(result.program, result.reservation, result.release),
-      reservation: presentReservation(
-        result.program,
-        reservationAfterRelease(result.reservation, result.release),
-      ),
+      reservation: presentReservation(result.program, result.reservation),
     };
   }
 }

@@ -3,7 +3,13 @@ import { type DbTransaction } from '../../database/database';
 import { type Money } from '../../money';
 import { planRelease } from '../domain/capacity-rules';
 import { ReleaseConflictError, ReservationNotFoundError } from '../domain/errors';
-import { type Origin, type Program, type Release, type Reservation } from '../domain/model';
+import {
+  type Origin,
+  type Program,
+  type Release,
+  type Reservation,
+  reservationAfterRelease,
+} from '../domain/model';
 import { CapacityRepository } from '../infrastructure/capacity.repository';
 import { type Actor } from './commands';
 
@@ -42,7 +48,12 @@ export class ReleaseProcessor {
       if (!isSameReleaseRequest(previous, reservation, command.amount)) {
         throw new ReleaseConflictError(command.releaseId);
       }
-      return { program, reservation, release: previous, created: false };
+      return {
+        program,
+        reservation: reservationAfterRelease(reservation, previous),
+        release: previous,
+        created: false,
+      };
     }
 
     const plan = planRelease(reservation, command.amount);

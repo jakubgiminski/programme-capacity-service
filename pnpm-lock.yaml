@@ -17,6 +17,9 @@ importers:
       '@nestjs/platform-express':
         specifier: ^11.2.11
         version: 11.2.11(@nestjs/common@11.2.11(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.11)
+      content-type:
+        specifier: 1.0.5
+        version: 1.0.5
       express:
         specifier: ^5.2.1
         version: 5.2.1
@@ -69,6 +72,9 @@ importers:
       '@testcontainers/redpanda':
         specifier: ^12.2.1
         version: 12.2.1(bare-buffer@3.7.3)
+      '@types/content-type':
+        specifier: 1.1.8
+        version: 1.1.8
       '@types/express':
         specifier: ^5.0.6
         version: 5.0.6
@@ -977,6 +983,9 @@ packages:
 
   '@types/connect@3.4.38':
     resolution: {integrity: sha512-K6uROf1LD88uDQqJCktA4yzL1YYAK6NgfsI0v/mTgyPKWsX1CnJ0XPSDhViejru1GcRkLWb8RlzFYJRqGUbaug==}
+
+  '@types/content-type@1.1.8':
+    resolution: {integrity: sha512-1tBhmVUeso3+ahfyaKluXe38p+94lovUZdoVfQ3OnJo9uJC42JT7CBoN3k9HYhAae+GwiBYmHu+N9FZhOG+2Pg==}
 
   '@types/cookiejar@2.1.5':
     resolution: {integrity: sha512-he+DHOWReW0nghN24E1WUqM0efK4kI9oTqDm6XmK8ZPe2djZ90BSNdGnIyCLzCPw7/pogPlGbzI2wHGGmi4O/Q==}
@@ -3938,6 +3947,8 @@ snapshots:
   '@types/connect@3.4.38':
     dependencies:
       '@types/node': 22.20.5
+
+  '@types/content-type@1.1.8': {}
 
   '@types/cookiejar@2.1.5': {}
 

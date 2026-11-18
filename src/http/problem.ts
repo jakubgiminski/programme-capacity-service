@@ -26,6 +26,13 @@ export class MalformedRequestError extends Error {
   }
 }
 
+export class PayloadTooLargeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PayloadTooLargeError';
+  }
+}
+
 export class UnsupportedMediaTypeError extends Error {
   constructor(message: string) {
     super(message);
