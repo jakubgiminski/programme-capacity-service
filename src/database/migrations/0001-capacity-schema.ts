@@ -3,7 +3,7 @@ import { type Kysely, sql } from 'kysely';
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
     CREATE TABLE programs (
-      id text PRIMARY KEY CHECK (id ~ '^[A-Za-z0-9._:-]{1,64}$'),
+      id text PRIMARY KEY CHECK (id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'),
       currency char(3) NOT NULL,
       limit_minor bigint NOT NULL CHECK (limit_minor >= 0),
       utilised_minor bigint NOT NULL DEFAULT 0 CHECK (utilised_minor >= 0),
@@ -35,7 +35,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     CREATE TABLE reservations (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       program_id text NOT NULL REFERENCES programs (id),
-      invoice_id text NOT NULL CHECK (invoice_id ~ '^[A-Za-z0-9._:-]{1,64}$'),
+      invoice_id text NOT NULL CHECK (invoice_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'),
       status text NOT NULL CHECK (status IN ('ACTIVE', 'PARTIALLY_RELEASED', 'RELEASED')),
       origin text NOT NULL CHECK (origin IN ('API', 'TREASURY')),
       invoice_amount_minor bigint NOT NULL CHECK (invoice_amount_minor > 0),
@@ -52,8 +52,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       created_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT reservations_program_invoice_unique UNIQUE (program_id, invoice_id),
-      CONSTRAINT reservations_status_matches_balance
-        CHECK ((status = 'RELEASED') = (released_minor = booked_minor)),
+      CONSTRAINT reservations_released_when_invoice_repaid
+        CHECK ((status = 'RELEASED') = (invoice_released_minor = invoice_amount_minor)),
+      CONSTRAINT reservations_released_frees_booking
+        CHECK (status <> 'RELEASED' OR released_minor = booked_minor),
       CONSTRAINT reservations_fx_snapshot_complete
         CHECK (
           (fx_rate IS NULL AND fx_scale IS NULL AND fx_source IS NULL AND fx_as_of IS NULL)
@@ -72,14 +74,20 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     CREATE TABLE releases (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       reservation_id uuid NOT NULL REFERENCES reservations (id),
-      release_id text NOT NULL CHECK (release_id ~ '^[A-Za-z0-9._:-]{1,64}$'),
+      release_id text NOT NULL CHECK (release_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'),
       requested_invoice_amount_minor bigint CHECK (requested_invoice_amount_minor > 0),
       invoice_amount_minor bigint NOT NULL CHECK (invoice_amount_minor > 0),
       freed_minor bigint NOT NULL CHECK (freed_minor >= 0),
       origin text NOT NULL CHECK (origin IN ('API', 'TREASURY')),
       actor text NOT NULL,
+      sequence bigint NOT NULL CHECK (sequence > 0),
+      status_after text NOT NULL CHECK (status_after IN ('PARTIALLY_RELEASED', 'RELEASED')),
+      invoice_released_after_minor bigint NOT NULL CHECK (invoice_released_after_minor > 0),
+      booked_after_minor bigint NOT NULL CHECK (booked_after_minor > 0),
+      released_after_minor bigint NOT NULL CHECK (released_after_minor >= 0),
       created_at timestamptz NOT NULL DEFAULT now(),
-      CONSTRAINT releases_reservation_release_unique UNIQUE (reservation_id, release_id)
+      CONSTRAINT releases_reservation_release_unique UNIQUE (reservation_id, release_id),
+      CONSTRAINT releases_reservation_sequence_unique UNIQUE (reservation_id, sequence)
     )
   `.execute(db);
 

@@ -102,3 +102,7 @@ export class ReservationAlreadyReleasedError extends CapacityError {
 export class AmountOutOfRangeCapacityError extends CapacityError {
   readonly code = 'amount-out-of-range';
 }
+
+export class InvalidAmountCapacityError extends CapacityError {
+  readonly code = 'invalid-amount';
+}

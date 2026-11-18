@@ -46,6 +46,11 @@ export interface Release {
   readonly freedMinor: bigint;
   readonly origin: Origin;
   readonly actor: string;
+  readonly sequence: bigint;
+  readonly statusAfter: ReservationStatus;
+  readonly invoiceReleasedAfterMinor: bigint;
+  readonly bookedAfterMinor: bigint;
+  readonly releasedAfterMinor: bigint;
   readonly createdAt: Date;
 }
 
@@ -59,4 +64,15 @@ export function outstandingMinor(reservation: Reservation): bigint {
 
 export function outstandingInvoiceMinor(reservation: Reservation): bigint {
   return reservation.invoiceAmountMinor - reservation.invoiceReleasedMinor;
+}
+
+export function reservationAfterRelease(reservation: Reservation, release: Release): Reservation {
+  return {
+    ...reservation,
+    status: release.statusAfter,
+    invoiceReleasedMinor: release.invoiceReleasedAfterMinor,
+    bookedMinor: release.bookedAfterMinor,
+    releasedMinor: release.releasedAfterMinor,
+    updatedAt: release.createdAt,
+  };
 }

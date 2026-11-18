@@ -9,6 +9,7 @@ import {
 import {
   AmountOutOfRangeCapacityError,
   InsufficientCapacityError,
+  InvalidAmountCapacityError,
   OverReleaseError,
   ReleaseCurrencyMismatchError,
   ReservationAlreadyReleasedError,
@@ -42,7 +43,14 @@ export function isSameReservationRequest(existing: Reservation, invoiceAmount: M
   );
 }
 
+export function assertPositiveAmount(amount: Money): void {
+  if (!amount.isPositive()) {
+    throw new InvalidAmountCapacityError('Amount must be greater than zero');
+  }
+}
+
 export function planBooking(program: Program, invoiceAmount: Money, rate: FxRate): BookingPlan {
+  assertPositiveAmount(invoiceAmount);
   const bookedMinor = convertRoundingUp(invoiceAmount, rate);
   const available = availableMinor(program);
   if (bookedMinor > available) {
@@ -66,9 +74,12 @@ export function planRelease(reservation: Reservation, requested: Money | null): 
   if (requested !== null && requested.currency !== reservation.invoiceCurrency) {
     throw new ReleaseCurrencyMismatchError(reservation.invoiceCurrency, requested.currency);
   }
+  if (requested !== null) {
+    assertPositiveAmount(requested);
+  }
   const outstandingInvoice = outstandingInvoiceMinor(reservation);
   const amount = requested?.minor ?? outstandingInvoice;
-  if (amount <= 0n || amount > outstandingInvoice) {
+  if (amount > outstandingInvoice) {
     throw new OverReleaseError(amount, outstandingInvoice);
   }
   const invoiceReleasedAfterMinor = reservation.invoiceReleasedMinor + amount;
@@ -78,7 +89,10 @@ export function planRelease(reservation: Reservation, requested: Money | null): 
     freedMinor: releasedAfterMinor - reservation.releasedMinor,
     invoiceReleasedAfterMinor,
     releasedAfterMinor,
-    status: releasedAfterMinor === reservation.bookedMinor ? 'RELEASED' : 'PARTIALLY_RELEASED',
+    status:
+      invoiceReleasedAfterMinor === reservation.invoiceAmountMinor
+        ? 'RELEASED'
+        : 'PARTIALLY_RELEASED',
   };
 }
 

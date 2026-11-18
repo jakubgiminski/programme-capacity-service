@@ -46,12 +46,18 @@ export class ReleaseProcessor {
     }
 
     const plan = planRelease(reservation, command.amount);
-    const updatedReservation = await this.repository.updateReservation(trx, reservation.id, {
-      status: plan.status,
-      invoiceReleasedMinor: plan.invoiceReleasedAfterMinor,
-      bookedMinor: reservation.bookedMinor,
-      releasedMinor: plan.releasedAfterMinor,
-    });
+    const now = new Date();
+    const updatedReservation = await this.repository.updateReservation(
+      trx,
+      reservation.id,
+      {
+        status: plan.status,
+        invoiceReleasedMinor: plan.invoiceReleasedAfterMinor,
+        bookedMinor: reservation.bookedMinor,
+        releasedMinor: plan.releasedAfterMinor,
+      },
+      now,
+    );
     const release = await this.repository.insertRelease(trx, {
       reservationId: reservation.id,
       releaseId: command.releaseId,
@@ -60,6 +66,12 @@ export class ReleaseProcessor {
       freedMinor: plan.freedMinor,
       origin: command.origin,
       actor: command.actor.subject,
+      sequence: program.version + 1n,
+      statusAfter: plan.status,
+      invoiceReleasedAfterMinor: plan.invoiceReleasedAfterMinor,
+      bookedAfterMinor: reservation.bookedMinor,
+      releasedAfterMinor: plan.releasedAfterMinor,
+      createdAt: now,
     });
     const updatedProgram = await this.repository.updateProgram(trx, program, {
       limitMinor: program.limitMinor,

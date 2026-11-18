@@ -45,6 +45,12 @@ export interface NewRelease {
   freedMinor: bigint;
   origin: Origin;
   actor: string;
+  sequence: bigint;
+  statusAfter: ReservationStatus;
+  invoiceReleasedAfterMinor: bigint;
+  bookedAfterMinor: bigint;
+  releasedAfterMinor: bigint;
+  createdAt: Date;
 }
 
 export interface ProgramBalances {
@@ -103,6 +109,11 @@ interface ReleaseRecord {
   freed_minor: bigint;
   origin: Origin;
   actor: string;
+  sequence: bigint;
+  status_after: ReservationStatus;
+  invoice_released_after_minor: bigint;
+  booked_after_minor: bigint;
+  released_after_minor: bigint;
   created_at: Date;
 }
 
@@ -164,6 +175,11 @@ function toRelease(row: ReleaseRecord): Release {
     freedMinor: row.freed_minor,
     origin: row.origin,
     actor: row.actor,
+    sequence: row.sequence,
+    statusAfter: row.status_after,
+    invoiceReleasedAfterMinor: row.invoice_released_after_minor,
+    bookedAfterMinor: row.booked_after_minor,
+    releasedAfterMinor: row.released_after_minor,
     createdAt: row.created_at,
   };
 }
@@ -289,6 +305,7 @@ export class CapacityRepository {
     db: Executor,
     reservationId: string,
     balances: ReservationBalances,
+    updatedAt: Date = new Date(),
   ): Promise<Reservation> {
     const row = await db
       .updateTable('reservations')
@@ -297,7 +314,7 @@ export class CapacityRepository {
         invoice_released_minor: balances.invoiceReleasedMinor,
         booked_minor: balances.bookedMinor,
         released_minor: balances.releasedMinor,
-        updated_at: new Date(),
+        updated_at: updatedAt,
       })
       .where('id', '=', reservationId)
       .returningAll()
@@ -324,8 +341,7 @@ export class CapacityRepository {
       .selectFrom('releases')
       .selectAll()
       .where('reservation_id', '=', reservationId)
-      .orderBy('created_at')
-      .orderBy('id')
+      .orderBy('sequence')
       .execute();
     return rows.map(toRelease);
   }
@@ -341,6 +357,12 @@ export class CapacityRepository {
         freed_minor: release.freedMinor,
         origin: release.origin,
         actor: release.actor,
+        sequence: release.sequence,
+        status_after: release.statusAfter,
+        invoice_released_after_minor: release.invoiceReleasedAfterMinor,
+        booked_after_minor: release.bookedAfterMinor,
+        released_after_minor: release.releasedAfterMinor,
+        created_at: release.createdAt,
       })
       .returningAll()
       .executeTakeFirstOrThrow();

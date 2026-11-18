@@ -52,16 +52,22 @@ export class CapacityQueries {
     };
   }
 
-  async getReservation(programId: string, invoiceId: string): Promise<ReservationDetails> {
-    const program = await this.repository.findProgram(this.db, programId);
-    if (program === null) {
-      throw new ProgramNotFoundError(programId);
-    }
-    const reservation = await this.repository.findReservation(this.db, programId, invoiceId);
-    if (reservation === null) {
-      throw new ReservationNotFoundError(programId, invoiceId);
-    }
-    const releases = await this.repository.listReleases(this.db, reservation.id);
-    return { program, reservation, releases };
+  getReservation(programId: string, invoiceId: string): Promise<ReservationDetails> {
+    return this.db
+      .transaction()
+      .setIsolationLevel('repeatable read')
+      .setAccessMode('read only')
+      .execute(async (trx) => {
+        const program = await this.repository.findProgram(trx, programId);
+        if (program === null) {
+          throw new ProgramNotFoundError(programId);
+        }
+        const reservation = await this.repository.findReservation(trx, programId, invoiceId);
+        if (reservation === null) {
+          throw new ReservationNotFoundError(programId, invoiceId);
+        }
+        const releases = await this.repository.listReleases(trx, reservation.id);
+        return { program, reservation, releases };
+      });
   }
 }

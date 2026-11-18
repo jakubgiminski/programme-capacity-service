@@ -207,6 +207,23 @@ describe('ReserveCapacity (Postgres)', () => {
     expect((await programState(database.db, id)).reservations).toBe(0);
   });
 
+  it('rejects a zero amount before fetching FX or writing', async () => {
+    const id = programId();
+    await createProgram(database.db, id, USD, 1_000n);
+    const calls = fx.calls;
+
+    await expect(
+      services.reserve.execute({
+        programId: id,
+        invoiceId: 'INV-0',
+        invoiceAmount: money(0n, USD),
+        actor: testActor,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid-amount' });
+    expect(fx.calls).toBe(calls);
+    expect((await programState(database.db, id)).reservations).toBe(0);
+  });
+
   it('rejects an unknown programme', async () => {
     await expect(
       services.reserve.execute({

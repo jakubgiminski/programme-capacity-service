@@ -18,6 +18,7 @@ const CAPACITY_STATUS: Record<string, number> = {
   'over-release': HttpStatus.UNPROCESSABLE_ENTITY,
   'release-currency-mismatch': HttpStatus.UNPROCESSABLE_ENTITY,
   'amount-out-of-range': HttpStatus.UNPROCESSABLE_ENTITY,
+  'invalid-amount': HttpStatus.UNPROCESSABLE_ENTITY,
 };
 
 const TITLES: Record<number, string> = {

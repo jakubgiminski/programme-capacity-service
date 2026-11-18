@@ -115,6 +115,81 @@ describe('ReleaseReservation (Postgres)', () => {
     expect(await programState(database.db, id)).toEqual(before);
   });
 
+  it('replays a partial release with its original snapshot after a later release', async () => {
+    const id = await programWithReservation();
+    const first = await services.release.execute({
+      programId: id,
+      invoiceId: 'INV-1',
+      releaseId: 'REL-A',
+      amount: money(1n, EUR),
+      actor: testActor,
+    });
+    await services.release.execute({
+      programId: id,
+      invoiceId: 'INV-1',
+      releaseId: 'REL-B',
+      amount: null,
+      actor: testActor,
+    });
+
+    const replay = await services.release.execute({
+      programId: id,
+      invoiceId: 'INV-1',
+      releaseId: 'REL-A',
+      amount: money(1n, EUR),
+      actor: testActor,
+    });
+
+    expect(replay.created).toBe(false);
+    expect(replay.release).toEqual(first.release);
+    expect(replay.release).toMatchObject({
+      statusAfter: 'PARTIALLY_RELEASED',
+      invoiceReleasedAfterMinor: 1n,
+      releasedAfterMinor: 333n,
+    });
+    expect(replay.reservation.status).toBe('RELEASED');
+  });
+
+  it('rejects a zero release amount without writing anything', async () => {
+    const id = await programWithReservation();
+    const before = await programState(database.db, id);
+
+    await expect(
+      services.release.execute({
+        programId: id,
+        invoiceId: 'INV-1',
+        releaseId: 'REL-1',
+        amount: money(0n, EUR),
+        actor: testActor,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid-amount' });
+    expect(await programState(database.db, id)).toEqual(before);
+  });
+
+  it('orders release history by application order under concurrency', async () => {
+    const id = await programWithReservation(30n);
+
+    await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        services.release.execute({
+          programId: id,
+          invoiceId: 'INV-1',
+          releaseId: `REL-${index}`,
+          amount: money(5n, EUR),
+          actor: testActor,
+        }),
+      ),
+    );
+
+    const details = await services.queries.getReservation(id, 'INV-1');
+    const sequences = details.releases.map((release) => release.sequence);
+    expect([...sequences].sort((a, b) => (a < b ? -1 : 1))).toEqual(sequences);
+    const cumulative = details.releases.map((release) => release.invoiceReleasedAfterMinor);
+    expect(cumulative).toEqual([5n, 10n, 15n, 20n, 25n, 30n]);
+    expect(details.reservation.status).toBe('RELEASED');
+    await expectInvariants(database.db, id);
+  });
+
   it('replays a full release even after the reservation is fully released', async () => {
     const id = await programWithReservation();
     const command = {

@@ -1,5 +1,12 @@
 import fc from 'fast-check';
-import { CapacityError } from '../../src/capacity/domain/errors';
+import {
+  InsufficientCapacityError,
+  InvoiceConflictError,
+  OverReleaseError,
+  ReleaseConflictError,
+  ReservationAlreadyReleasedError,
+  ReservationNotFoundError,
+} from '../../src/capacity/domain/errors';
 import { type Db } from '../../src/database/database';
 import { type CurrencyCode } from '../../src/money';
 import {
@@ -21,42 +28,183 @@ type Operation =
   | { kind: 'reserve'; invoice: number; amount: bigint; currency: CurrencyCode }
   | { kind: 'release'; invoice: number; releaseId: number; amount: bigint | null }
   | { kind: 'limit'; limit: bigint }
-  | {
-      kind: 'snapshot';
-      limit: bigint;
-      entries: { invoice: number; booked: bigint }[];
-    };
+  | { kind: 'snapshot'; limit: bigint; entries: { invoice: number; booked: bigint }[] };
+
+interface ModelReservation {
+  currency: CurrencyCode;
+  invoiceAmount: bigint;
+  booked: bigint;
+  released: bigint;
+  invoiceReleased: bigint;
+  releases: Map<string, bigint | null>;
+}
+
+interface Model {
+  limit: bigint;
+  utilised: bigint;
+  reservations: Map<string, ModelReservation>;
+}
+
+type Expected =
+  | { outcome: 'reserved'; booked: bigint }
+  | { outcome: 'released'; freed: bigint }
+  | { outcome: 'replayed' }
+  | { outcome: 'rejected'; error: new (...args: never[]) => Error };
+
+const RATES: Record<string, { scaled: bigint; exponent: bigint }> = {
+  USD: { scaled: 10_000_000_000n, exponent: 2n },
+  EUR: { scaled: 10_853_000_000n, exponent: 2n },
+  JPY: { scaled: 66_500_000n, exponent: 0n },
+};
+
+function expectedBooking(amount: bigint, currency: CurrencyCode): bigint {
+  const rate = RATES[currency]!;
+  const numerator = amount * rate.scaled * 100n;
+  const denominator = 10_000_000_000n * 10n ** rate.exponent;
+  return (numerator + denominator - 1n) / denominator;
+}
+
+function expectReserve(
+  model: Model,
+  invoiceId: string,
+  amount: bigint,
+  currency: CurrencyCode,
+): Expected {
+  const existing = model.reservations.get(invoiceId);
+  if (existing !== undefined) {
+    if (existing.invoiceAmount === amount && existing.currency === currency) {
+      return { outcome: 'replayed' };
+    }
+    return { outcome: 'rejected', error: InvoiceConflictError };
+  }
+  const booked = expectedBooking(amount, currency);
+  if (booked > model.limit - model.utilised) {
+    return { outcome: 'rejected', error: InsufficientCapacityError };
+  }
+  model.reservations.set(invoiceId, {
+    currency,
+    invoiceAmount: amount,
+    booked,
+    released: 0n,
+    invoiceReleased: 0n,
+    releases: new Map(),
+  });
+  model.utilised += booked;
+  return { outcome: 'reserved', booked };
+}
+
+function expectRelease(
+  model: Model,
+  invoiceId: string,
+  releaseId: string,
+  amount: bigint | null,
+): Expected {
+  const reservation = model.reservations.get(invoiceId);
+  if (reservation === undefined) {
+    return { outcome: 'rejected', error: ReservationNotFoundError };
+  }
+  if (reservation.releases.has(releaseId)) {
+    return reservation.releases.get(releaseId) === amount
+      ? { outcome: 'replayed' }
+      : { outcome: 'rejected', error: ReleaseConflictError };
+  }
+  if (reservation.invoiceReleased === reservation.invoiceAmount) {
+    return { outcome: 'rejected', error: ReservationAlreadyReleasedError };
+  }
+  const outstandingInvoice = reservation.invoiceAmount - reservation.invoiceReleased;
+  const slice = amount ?? outstandingInvoice;
+  if (slice > outstandingInvoice) {
+    return { outcome: 'rejected', error: OverReleaseError };
+  }
+  const cumulative = reservation.invoiceReleased + slice;
+  const target = cumulativeFreed(reservation, cumulative);
+  const freed = target - reservation.released;
+  reservation.released = target;
+  reservation.invoiceReleased = cumulative;
+  reservation.releases.set(releaseId, amount);
+  model.utilised -= freed;
+  return { outcome: 'released', freed };
+}
+
+function cumulativeFreed(reservation: ModelReservation, cumulativeInvoice: bigint): bigint {
+  if (cumulativeInvoice === reservation.invoiceAmount) {
+    return reservation.booked;
+  }
+  const share = (reservation.booked * cumulativeInvoice) / reservation.invoiceAmount;
+  if (share < reservation.released) {
+    return reservation.released;
+  }
+  return share;
+}
+
+async function resyncFromDatabase(db: Db, programId: string, model: Model): Promise<void> {
+  const program = await db
+    .selectFrom('programs')
+    .select(['limit_minor', 'utilised_minor'])
+    .where('id', '=', programId)
+    .executeTakeFirstOrThrow();
+  model.limit = program.limit_minor;
+  model.utilised = program.utilised_minor;
+  const rows = await db
+    .selectFrom('reservations')
+    .selectAll()
+    .where('program_id', '=', programId)
+    .execute();
+  for (const row of rows) {
+    const known = model.reservations.get(row.invoice_id);
+    model.reservations.set(row.invoice_id, {
+      currency: row.invoice_currency as CurrencyCode,
+      invoiceAmount: row.invoice_amount_minor,
+      booked: row.booked_minor,
+      released: row.released_minor,
+      invoiceReleased: row.invoice_released_minor,
+      releases: known?.releases ?? new Map(),
+    });
+  }
+}
 
 const invoiceArb = fc.integer({ min: 0, max: 8 });
 
 const operationArb: fc.Arbitrary<Operation> = fc.oneof(
-  fc.record({
-    kind: fc.constant('reserve' as const),
-    invoice: invoiceArb,
-    amount: fc.bigInt({ min: 1n, max: 400_000n }),
-    currency: fc.constantFrom(USD, EUR, JPY),
-  }),
-  fc.record({
-    kind: fc.constant('release' as const),
-    invoice: invoiceArb,
-    releaseId: fc.integer({ min: 0, max: 3 }),
-    amount: fc.option(fc.bigInt({ min: 1n, max: 200_000n }), { nil: null }),
-  }),
-  fc.record({
-    kind: fc.constant('limit' as const),
-    limit: fc.bigInt({ min: 0n, max: 2_000_000n }),
-  }),
-  fc.record({
-    kind: fc.constant('snapshot' as const),
-    limit: fc.bigInt({ min: 0n, max: 2_000_000n }),
-    entries: fc.uniqueArray(
-      fc.record({
-        invoice: fc.integer({ min: 0, max: 8 }),
-        booked: fc.bigInt({ min: 1n, max: 300_000n }),
-      }),
-      { selector: (entry) => entry.invoice, maxLength: 6 },
-    ),
-  }),
+  {
+    weight: 4,
+    arbitrary: fc.record({
+      kind: fc.constant('reserve' as const),
+      invoice: invoiceArb,
+      amount: fc.bigInt({ min: 1n, max: 400_000n }),
+      currency: fc.constantFrom(USD, EUR, JPY),
+    }),
+  },
+  {
+    weight: 4,
+    arbitrary: fc.record({
+      kind: fc.constant('release' as const),
+      invoice: invoiceArb,
+      releaseId: fc.integer({ min: 0, max: 3 }),
+      amount: fc.option(fc.bigInt({ min: 1n, max: 200_000n }), { nil: null }),
+    }),
+  },
+  {
+    weight: 1,
+    arbitrary: fc.record({
+      kind: fc.constant('limit' as const),
+      limit: fc.bigInt({ min: 0n, max: 2_000_000n }),
+    }),
+  },
+  {
+    weight: 1,
+    arbitrary: fc.record({
+      kind: fc.constant('snapshot' as const),
+      limit: fc.bigInt({ min: 0n, max: 2_000_000n }),
+      entries: fc.uniqueArray(
+        fc.record({
+          invoice: fc.integer({ min: 0, max: 8 }),
+          booked: fc.bigInt({ min: 1n, max: 300_000n }),
+        }),
+        { selector: (entry) => entry.invoice, maxLength: 6 },
+      ),
+    }),
+  },
 );
 
 describe('capacity properties (Postgres)', () => {
@@ -76,34 +224,117 @@ describe('capacity properties (Postgres)', () => {
     await database.destroy();
   });
 
-  it('keeps balances consistent for any sequence of reservations, releases, limit changes and snapshots', async () => {
+  it('matches a reference model for any sequence of reservations, releases, limit changes and snapshots', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(operationArb, { minLength: 1, maxLength: 25 }),
         async (operations) => {
           run += 1;
           const programId = `PRG-P-${run}`;
-          const stream = { revision: 1 };
+          let revision = 1;
           await services.treasury.execute(
             inbound(limitSet(`${programId}-1`, programId, 1, '1000000')),
           );
+          const model: Model = { limit: 1_000_000n, utilised: 0n, reservations: new Map() };
 
           for (const operation of operations) {
             const before = await programState(database.db, programId);
-            const outcome = await apply(services, database.db, programId, operation, stream);
-            const after = await programState(database.db, programId);
 
-            if (outcome.status === 'rejected') {
-              expect(outcome.error).toBeInstanceOf(CapacityError);
-              expect(after).toEqual(before);
+            if (operation.kind === 'limit' || operation.kind === 'snapshot') {
+              revision += 1;
+              const messageId = `${programId}-${revision}`;
+              const message =
+                operation.kind === 'limit'
+                  ? limitSet(messageId, programId, revision, operation.limit.toString())
+                  : snapshot(
+                      messageId,
+                      programId,
+                      revision,
+                      operation.limit.toString(),
+                      operation.entries.map((entry) => {
+                        const local = model.reservations.get(`INV-${entry.invoice}`);
+                        return {
+                          invoiceId: `INV-${entry.invoice}`,
+                          invoiceAmount: (local?.invoiceAmount ?? entry.booked).toString(),
+                          invoiceCurrency: local?.currency ?? 'USD',
+                          bookedAmount: entry.booked.toString(),
+                        };
+                      }),
+                    );
+              const result = await services.treasury.execute(inbound(message));
+              expect(result.outcome).toBe('APPLIED');
+              await resyncFromDatabase(database.db, programId, model);
+              await expectInvariants(database.db, programId);
+              continue;
             }
-            if (outcome.status === 'reserved') {
-              expect(after.utilisedMinor - before.utilisedMinor).toBe(outcome.bookedMinor);
-              expect(outcome.bookedMinor <= before.limitMinor - before.utilisedMinor).toBe(true);
+
+            const invoiceId = `INV-${operation.invoice}`;
+            if (operation.kind === 'reserve') {
+              const expected = expectReserve(
+                model,
+                invoiceId,
+                operation.amount,
+                operation.currency,
+              );
+              const actual = await services.reserve
+                .execute({
+                  programId,
+                  invoiceId,
+                  invoiceAmount: money(operation.amount, operation.currency),
+                  actor: testActor,
+                })
+                .then(
+                  (result) => ({ ok: true as const, result }),
+                  (error: unknown) => ({ ok: false as const, error }),
+                );
+              if (expected.outcome === 'rejected') {
+                expect(actual.ok ? 'accepted' : actual.error).toBeInstanceOf(expected.error);
+                expect(await programState(database.db, programId)).toEqual(before);
+              }
+              if (expected.outcome === 'reserved') {
+                expect(actual.ok && actual.result.created).toBe(true);
+                expect(actual.ok && actual.result.reservation.bookedMinor).toBe(expected.booked);
+                expect(expected.booked <= before.limitMinor - before.utilisedMinor).toBe(true);
+              }
+              if (expected.outcome === 'replayed') {
+                expect(actual.ok && !actual.result.created).toBe(true);
+                expect(await programState(database.db, programId)).toEqual(before);
+              }
             }
-            if (outcome.status === 'replayed') {
-              expect(after).toEqual(before);
+
+            if (operation.kind === 'release') {
+              const releaseId = `REL-${operation.releaseId}`;
+              const expected = expectRelease(model, invoiceId, releaseId, operation.amount);
+              const currency = model.reservations.get(invoiceId)?.currency ?? USD;
+              const actual = await services.release
+                .execute({
+                  programId,
+                  invoiceId,
+                  releaseId,
+                  amount: operation.amount === null ? null : money(operation.amount, currency),
+                  actor: testActor,
+                })
+                .then(
+                  (result) => ({ ok: true as const, result }),
+                  (error: unknown) => ({ ok: false as const, error }),
+                );
+              if (expected.outcome === 'rejected') {
+                expect(actual.ok ? 'accepted' : actual.error).toBeInstanceOf(expected.error);
+                expect(await programState(database.db, programId)).toEqual(before);
+              }
+              if (expected.outcome === 'released') {
+                expect(actual.ok && actual.result.created).toBe(true);
+                expect(actual.ok && actual.result.release.freedMinor).toBe(expected.freed);
+              }
+              if (expected.outcome === 'replayed') {
+                expect(actual.ok && !actual.result.created).toBe(true);
+                expect(await programState(database.db, programId)).toEqual(before);
+              }
             }
+
+            const after = await programState(database.db, programId);
+            expect(after.utilisedMinor).toBe(model.utilised);
+            expect(after.limitMinor).toBe(model.limit);
             await expectInvariants(database.db, programId);
           }
         },
@@ -112,72 +343,3 @@ describe('capacity properties (Postgres)', () => {
     );
   });
 });
-
-type Outcome =
-  | { status: 'reserved'; bookedMinor: bigint }
-  | { status: 'released' }
-  | { status: 'replayed' }
-  | { status: 'treasury' }
-  | { status: 'rejected'; error: unknown };
-
-async function apply(
-  services: CapacityServices,
-  db: Db,
-  programId: string,
-  operation: Operation,
-  stream: { revision: number },
-): Promise<Outcome> {
-  if (operation.kind === 'limit' || operation.kind === 'snapshot') {
-    stream.revision += 1;
-    const messageId = `${programId}-${stream.revision}`;
-    const message =
-      operation.kind === 'limit'
-        ? limitSet(messageId, programId, stream.revision, operation.limit.toString())
-        : snapshot(
-            messageId,
-            programId,
-            stream.revision,
-            operation.limit.toString(),
-            operation.entries.map((entry) => ({
-              invoiceId: `INV-${entry.invoice}`,
-              invoiceAmount: entry.booked.toString(),
-              invoiceCurrency: 'USD',
-              bookedAmount: entry.booked.toString(),
-            })),
-          );
-    const result = await services.treasury.execute(inbound(message));
-    expect(result.outcome).toBe('APPLIED');
-    return { status: 'treasury' };
-  }
-  try {
-    if (operation.kind === 'reserve') {
-      const result = await services.reserve.execute({
-        programId,
-        invoiceId: `INV-${operation.invoice}`,
-        invoiceAmount: money(operation.amount, operation.currency),
-        actor: testActor,
-      });
-      return result.created
-        ? { status: 'reserved', bookedMinor: result.reservation.bookedMinor }
-        : { status: 'replayed' };
-    }
-    const reservation = await services.repository.findReservation(
-      db,
-      programId,
-      `INV-${operation.invoice}`,
-    );
-    const result = await services.release.execute({
-      programId,
-      invoiceId: `INV-${operation.invoice}`,
-      releaseId: `REL-${operation.releaseId}`,
-      amount:
-        operation.amount === null || reservation === null
-          ? null
-          : money(operation.amount, reservation.invoiceCurrency),
-      actor: testActor,
-    });
-    return result.created ? { status: 'released' } : { status: 'replayed' };
-  } catch (error) {
-    return { status: 'rejected', error };
-  }
-}

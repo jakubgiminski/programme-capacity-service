@@ -46,6 +46,11 @@ export interface ReleasesTable {
   freed_minor: bigint;
   origin: Origin;
   actor: string;
+  sequence: bigint;
+  status_after: ReservationStatus;
+  invoice_released_after_minor: bigint;
+  booked_after_minor: bigint;
+  released_after_minor: bigint;
   created_at: CreatedAt;
 }
 

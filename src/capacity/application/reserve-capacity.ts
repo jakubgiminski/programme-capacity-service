@@ -1,7 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DATABASE, type Db } from '../../database/database';
 import { FX_RATE_PROVIDER, type FxRateProvider } from '../../fx/fx-rate-provider';
-import { isSameReservationRequest, planBooking } from '../domain/capacity-rules';
+import {
+  assertPositiveAmount,
+  isSameReservationRequest,
+  planBooking,
+} from '../domain/capacity-rules';
 import {
   FxRateUnavailableError,
   InvoiceConflictError,
@@ -25,8 +29,9 @@ export class ReserveCapacity {
     @Inject(CapacityRepository) private readonly repository: CapacityRepository,
   ) {}
 
-  execute(command: ReserveCapacityCommand): Promise<ReserveCapacityResult> {
-    return this.db.transaction().execute(async (trx) => {
+  async execute(command: ReserveCapacityCommand): Promise<ReserveCapacityResult> {
+    assertPositiveAmount(command.invoiceAmount);
+    return await this.db.transaction().execute(async (trx) => {
       const program = await this.repository.lockProgram(trx, command.programId);
       if (program === null) {
         throw new ProgramNotFoundError(command.programId);

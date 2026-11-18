@@ -3,6 +3,7 @@ import { isSameReservationRequest, planBooking, planRelease } from './capacity-r
 import {
   AmountOutOfRangeCapacityError,
   InsufficientCapacityError,
+  InvalidAmountCapacityError,
   OverReleaseError,
   ReleaseCurrencyMismatchError,
   ReservationAlreadyReleasedError,
@@ -164,6 +165,28 @@ describe('planRelease', () => {
 
     expect(plan.freedMinor).toBe(0n);
     expect(plan.releasedAfterMinor).toBe(500n);
+  });
+
+  it('closes a partially repaid invoice with zero exposure on its final repayment', () => {
+    const plan = planRelease(
+      reservation({
+        status: 'PARTIALLY_RELEASED',
+        invoiceAmountMinor: 100n,
+        invoiceReleasedMinor: 50n,
+        bookedMinor: 500n,
+        releasedMinor: 500n,
+      }),
+      null,
+    );
+
+    expect(plan).toMatchObject({ invoiceAmountMinor: 50n, freedMinor: 0n, status: 'RELEASED' });
+  });
+
+  it('rejects zero amounts', () => {
+    expect(() => planRelease(reservation(), Money.of(0n, EUR))).toThrow(InvalidAmountCapacityError);
+    expect(() => planBooking(program(), Money.of(0n, EUR), eurUsd)).toThrow(
+      InvalidAmountCapacityError,
+    );
   });
 
   it('rejects releasing more than is outstanding', () => {
