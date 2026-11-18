@@ -220,3 +220,11 @@ Each step ends with green lint, typecheck and tests, conventional commits, and a
 4. HTTP controllers, auth guard, problem+json error mapping; e2e tests
 5. Kafka consumer, ordering and parking, fail-safe merge, DLQ; Kafka integration tests
 6. Scripts (dev token, seed, sample messages), README, final polish
+
+## 14. Deviations recorded during implementation
+
+- NestJS 11, Kysely 0.28 and jose 5 (CommonJS builds) instead of the latest ESM-only majors, so Jest runs without ESM workarounds.
+- Semantic rejections are written to a `treasury_dead_letters` outbox in the same transaction as the dedupe record and published to the DLQ after commit; only unreadable messages (invalid JSON or envelope) are published directly before the offset commit. A rejected message advances the revision only when it is the next contiguous one.
+- Added `reservations.invoice_released_minor` and `releases.requested_invoice_amount_minor` for cumulative partial releases and exact release-idempotency comparison.
+- Treasury writers take a per-programme advisory lock before the programme row lock, because a treasury message may create the programme.
+- A snapshot's limit change is ledgered as `LIMIT_SET` (reason `SNAPSHOT_LIMIT`); reservation adjustments as `RECONCILE_ADJUST`.
