@@ -6,6 +6,8 @@ import { ReleaseReservation } from '../../src/capacity/application/release-reser
 import { ReserveCapacity } from '../../src/capacity/application/reserve-capacity';
 import { type Program } from '../../src/capacity/domain/model';
 import { CapacityRepository } from '../../src/capacity/infrastructure/capacity.repository';
+import { TreasuryRepository } from '../../src/capacity/infrastructure/treasury.repository';
+import { ApplyTreasuryMessage } from '../../src/capacity/application/apply-treasury-message';
 import { type Db } from '../../src/database/database';
 import { type FxRateProvider } from '../../src/fx/fx-rate-provider';
 import { type CurrencyCode, type FxRate, Money, parseCurrency, parseFxRate } from '../../src/money';
@@ -62,17 +64,20 @@ export interface CapacityServices {
   release: ReleaseReservation;
   processor: ReleaseProcessor;
   queries: CapacityQueries;
+  treasury: ApplyTreasuryMessage;
 }
 
 export function buildCapacityServices(db: Db, fx: FxRateProvider): CapacityServices {
   const repository = new CapacityRepository();
   const processor = new ReleaseProcessor(repository);
+  const treasuryRepository = new TreasuryRepository();
   return {
     repository,
     processor,
     reserve: new ReserveCapacity(db, fx, repository),
     release: new ReleaseReservation(db, repository, processor),
-    queries: new CapacityQueries(db, repository),
+    queries: new CapacityQueries(db, repository, treasuryRepository),
+    treasury: new ApplyTreasuryMessage(db, repository, treasuryRepository, processor),
   };
 }
 

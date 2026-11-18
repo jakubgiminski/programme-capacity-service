@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { Kysely, PostgresDialect, type Transaction } from 'kysely';
 import { Pool, TypeOverrides } from 'pg';
 import { type Database } from './database.types';
@@ -27,6 +28,10 @@ export function createDatabase(options: DatabaseOptions): Db {
     max: options.maxConnections,
     application_name: options.applicationName ?? 'programme-capacity-service',
     types: typeOverrides(),
+  });
+  const logger = new Logger('Database');
+  pool.on('error', (error) => {
+    logger.warn({ err: error }, 'Idle database connection failed and was discarded');
   });
   return new Kysely<Database>({ dialect: new PostgresDialect({ pool }) });
 }

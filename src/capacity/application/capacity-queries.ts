@@ -3,11 +3,18 @@ import { DATABASE, type Db } from '../../database/database';
 import { ProgramNotFoundError, ReservationNotFoundError } from '../domain/errors';
 import { availableMinor, type Program, type Release, type Reservation } from '../domain/model';
 import { CapacityRepository } from '../infrastructure/capacity.repository';
+import { type OpenDiscrepancy, TreasuryRepository } from '../infrastructure/treasury.repository';
 
 export interface CapacityView {
   readonly program: Program;
   readonly availableMinor: bigint;
   readonly overUtilised: boolean;
+  readonly openDiscrepancies: number;
+}
+
+export interface DiscrepancyList {
+  readonly program: Program;
+  readonly discrepancies: OpenDiscrepancy[];
 }
 
 export interface ReservationDetails {
@@ -21,6 +28,7 @@ export class CapacityQueries {
   constructor(
     @Inject(DATABASE) private readonly db: Db,
     private readonly repository: CapacityRepository,
+    private readonly treasury: TreasuryRepository,
   ) {}
 
   async getCapacity(programId: string): Promise<CapacityView> {
@@ -29,7 +37,19 @@ export class CapacityQueries {
       throw new ProgramNotFoundError(programId);
     }
     const available = availableMinor(program);
-    return { program, availableMinor: available, overUtilised: available < 0n };
+    const openDiscrepancies = await this.treasury.countOpenDiscrepancies(this.db, programId);
+    return { program, availableMinor: available, overUtilised: available < 0n, openDiscrepancies };
+  }
+
+  async listOpenDiscrepancies(programId: string): Promise<DiscrepancyList> {
+    const program = await this.repository.findProgram(this.db, programId);
+    if (program === null) {
+      throw new ProgramNotFoundError(programId);
+    }
+    return {
+      program,
+      discrepancies: await this.treasury.listOpenDiscrepancies(this.db, programId),
+    };
   }
 
   async getReservation(programId: string, invoiceId: string): Promise<ReservationDetails> {

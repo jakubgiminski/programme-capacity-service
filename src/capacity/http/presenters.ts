@@ -1,5 +1,6 @@
 import { type CurrencyCode, formatFxRate, type MoneyJson } from '../../money';
 import { type CapacityView } from '../application/capacity-queries';
+import { type OpenDiscrepancy } from '../infrastructure/treasury.repository';
 import {
   availableMinor,
   outstandingMinor,
@@ -21,6 +22,7 @@ export function presentCapacity(view: CapacityView) {
     utilised: money(program.utilisedMinor, program.currency),
     available: money(availableMinor(program), program.currency),
     overUtilised: view.overUtilised,
+    openDiscrepancies: view.openDiscrepancies,
     version: program.version.toString(),
     updatedAt: program.updatedAt.toISOString(),
   };
@@ -57,5 +59,26 @@ export function presentRelease(program: Program, reservation: Reservation, relea
     invoiceAmount: money(release.invoiceAmountMinor, reservation.invoiceCurrency),
     freed: money(release.freedMinor, program.currency),
     createdAt: release.createdAt.toISOString(),
+  };
+}
+
+export function presentDiscrepancy(program: Program, discrepancy: OpenDiscrepancy) {
+  return {
+    invoiceId: discrepancy.invoiceId,
+    kind: discrepancy.kind,
+    localStatus: discrepancy.localStatus,
+    localOutstanding:
+      discrepancy.localOutstandingMinor === null
+        ? null
+        : money(discrepancy.localOutstandingMinor, program.currency),
+    treasuryOutstanding:
+      discrepancy.treasuryOutstandingMinor === null
+        ? null
+        : money(discrepancy.treasuryOutstandingMinor, program.currency),
+    detail: discrepancy.detail,
+    snapshotMessageId: discrepancy.snapshotMessageId,
+    snapshotRevision: discrepancy.snapshotRevision.toString(),
+    detectedAt: discrepancy.detectedAt.toISOString(),
+    lastSeenAt: discrepancy.lastSeenAt.toISOString(),
   };
 }

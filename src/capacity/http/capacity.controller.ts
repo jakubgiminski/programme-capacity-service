@@ -8,10 +8,15 @@ import { CapacityQueries } from '../application/capacity-queries';
 import { type Actor } from '../application/commands';
 import { ReleaseReservation } from '../application/release-reservation';
 import { ReserveCapacity } from '../application/reserve-capacity';
-import { presentCapacity, presentRelease, presentReservation } from './presenters';
-import { RequestActor } from './request-actor.decorator';
 import {
-  identifierSchema,
+  presentCapacity,
+  presentDiscrepancy,
+  presentRelease,
+  presentReservation,
+} from './presenters';
+import { RequestActor } from './request-actor.decorator';
+import { identifierSchema } from '../domain/identifier';
+import {
   type ReleaseBody,
   releaseBodySchema,
   type ReserveBody,
@@ -32,6 +37,16 @@ export class CapacityController {
   @RequireScope(Scope.Read)
   async getCapacity(@Param('programId', idPipe) programId: string) {
     return presentCapacity(await this.queries.getCapacity(programId));
+  }
+
+  @Get('discrepancies')
+  @RequireScope(Scope.Read)
+  async getDiscrepancies(@Param('programId', idPipe) programId: string) {
+    const list = await this.queries.listOpenDiscrepancies(programId);
+    return {
+      programId,
+      discrepancies: list.discrepancies.map((item) => presentDiscrepancy(list.program, item)),
+    };
   }
 
   @Post('reservations')

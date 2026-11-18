@@ -17,6 +17,7 @@ export interface NewProgram {
   id: string;
   currency: CurrencyCode;
   limitMinor: bigint;
+  treasuryRevision?: bigint;
 }
 
 export interface NewReservation {
@@ -191,7 +192,12 @@ export class CapacityRepository {
   async insertProgram(db: Executor, program: NewProgram): Promise<Program> {
     const row = await db
       .insertInto('programs')
-      .values({ id: program.id, currency: program.currency, limit_minor: program.limitMinor })
+      .values({
+        id: program.id,
+        currency: program.currency,
+        limit_minor: program.limitMinor,
+        treasury_revision: program.treasuryRevision ?? 0n,
+      })
       .returning(programColumns)
       .executeTakeFirstOrThrow();
     return toProgram(row);
@@ -234,6 +240,25 @@ export class CapacityRepository {
       .selectAll()
       .where('program_id', '=', programId)
       .where('status', '<>', 'RELEASED')
+      .orderBy('invoice_id')
+      .execute();
+    return rows.map(toReservation);
+  }
+
+  async listReservationsForReconciliation(
+    db: Executor,
+    programId: string,
+    invoiceIds: readonly string[],
+  ): Promise<Reservation[]> {
+    const rows = await db
+      .selectFrom('reservations')
+      .selectAll()
+      .where('program_id', '=', programId)
+      .where((eb) =>
+        invoiceIds.length === 0
+          ? eb('status', '<>', 'RELEASED')
+          : eb.or([eb('status', '<>', 'RELEASED'), eb('invoice_id', 'in', [...invoiceIds])]),
+      )
       .orderBy('invoice_id')
       .execute();
     return rows.map(toReservation);
