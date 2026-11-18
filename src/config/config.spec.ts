@@ -30,6 +30,35 @@ describe('loadConfig', () => {
     expect(config.PORT).toBe(8080);
   });
 
+  it('accepts TLS and a complete SASL configuration', () => {
+    const config = loadConfig({
+      ...baseEnv,
+      KAFKA_SSL: 'true',
+      KAFKA_SASL_MECHANISM: 'scram-sha-512',
+      KAFKA_SASL_USERNAME: 'capacity',
+      KAFKA_SASL_PASSWORD: 'secret',
+      KAFKA_CREATE_TOPICS: 'false',
+    });
+
+    expect(config).toMatchObject({
+      KAFKA_SSL: true,
+      KAFKA_SASL_MECHANISM: 'scram-sha-512',
+      KAFKA_CREATE_TOPICS: false,
+    });
+  });
+
+  it('rejects a partial SASL configuration', () => {
+    expect(() => loadConfig({ ...baseEnv, KAFKA_SASL_MECHANISM: 'plain' })).toThrow(
+      /KAFKA_SASL_MECHANISM/,
+    );
+  });
+
+  it('rejects a dead-letter topic equal to the source topic', () => {
+    expect(() =>
+      loadConfig({ ...baseEnv, KAFKA_TOPIC: 'treasury', KAFKA_DLQ_TOPIC: 'treasury' }),
+    ).toThrow(/KAFKA_DLQ_TOPIC must differ/);
+  });
+
   it('rejects a missing database url', () => {
     expect(() => loadConfig({ ...baseEnv, DATABASE_URL: undefined })).toThrow(
       ConfigValidationError,

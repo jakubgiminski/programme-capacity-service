@@ -1,8 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { Logger } from '@nestjs/common';
 import { RedpandaContainer, type StartedRedpandaContainer } from '@testcontainers/redpanda';
-import { type Admin, type IHeaders, Kafka, logLevel, Partitioners, type Producer } from 'kafkajs';
+import {
+  type Admin,
+  type Consumer,
+  type IHeaders,
+  Kafka,
+  logLevel,
+  type Message,
+  Partitioners,
+  type Producer,
+} from 'kafkajs';
 import { KAFKA_HEALTH, type KafkaHealth } from '../../src/treasury/kafka-health';
+import { TreasuryConsumer } from '../../src/treasury/treasury-consumer';
+import { MAX_SNAPSHOT_RESERVATIONS } from '../../src/treasury/treasury-messages';
 import { programState } from '../support/capacity-fixture';
 import { eventually } from '../support/eventually';
 import { createTestApp, type TestApp } from '../support/test-app';
@@ -10,7 +21,8 @@ import { createTestDatabase, type TestDatabase, withAdminClient } from '../suppo
 import { invoiceRepaid, limitSet, snapshot } from '../support/treasury-messages';
 
 interface DeadLetterRecord {
-  value: string;
+  value: Buffer | null;
+  text: string;
   headers: Record<string, string>;
 }
 
@@ -24,6 +36,7 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
   let topic: string;
   let dlqTopic: string;
   let groupId: string;
+  let produced: Map<number, bigint>;
 
   async function startApp(): Promise<TestApp> {
     const started = await createTestApp(database, {
@@ -50,6 +63,12 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
     app = null;
   }
 
+  async function send(message: Message): Promise<void> {
+    const [metadata] = await producer.send({ topic, acks: -1, messages: [message] });
+    const next = BigInt(metadata!.baseOffset!) + 1n;
+    produced.set(metadata!.partition, next);
+  }
+
   async function produce(
     messages: (Record<string, unknown> | string)[],
     key = 'PRG',
@@ -58,15 +77,29 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
       const value = typeof message === 'string' ? message : JSON.stringify(message);
       const programId =
         typeof message === 'string' ? key : ((message.programId as string | undefined) ?? key);
-      await producer.send({ topic, acks: -1, messages: [{ key: programId, value }] });
+      await send({ key: programId, value });
     }
   }
 
-  async function committed(): Promise<number> {
+  async function committedOffsets(): Promise<Map<number, bigint>> {
     const offsets = await admin.fetchOffsets({ groupId, topics: [topic] });
-    return offsets
-      .flatMap((entry) => entry.partitions)
-      .reduce((sum, partition) => sum + Math.max(Number(partition.offset), 0), 0);
+    return new Map(
+      offsets
+        .flatMap((entry) => entry.partitions)
+        .filter((partition) => Number(partition.offset) >= 0)
+        .map((partition) => [partition.partition, BigInt(partition.offset)]),
+    );
+  }
+
+  async function allCommitted(timeoutMs = 20_000): Promise<void> {
+    const expected = [...produced.entries()].sort(([a], [b]) => a - b);
+    await eventually(
+      committedOffsets,
+      (offsets) =>
+        expected.every(([partition, offset]) => offsets.get(partition) === offset) &&
+        offsets.size === expected.length,
+      timeoutMs,
+    );
   }
 
   async function processedCount(programId: string): Promise<number> {
@@ -86,7 +119,8 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
     await consumer.run({
       eachMessage: ({ message }) => {
         records.push({
-          value: message.value?.toString('utf8') ?? '',
+          value: message.value,
+          text: message.value?.toString('utf8') ?? '',
           headers: decodeHeaders(message.headers),
         });
         return Promise.resolve();
@@ -131,6 +165,7 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
     topic = `treasury.test.${suffix}`;
     dlqTopic = `${topic}.dlq`;
     groupId = `capacity-${suffix}`;
+    produced = new Map();
     database = await createTestDatabase();
   });
 
@@ -153,16 +188,16 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
     ];
     await startApp();
     await produce(stream, id);
-    await eventually(committed, (count) => count === stream.length);
+    await allCommitted();
     const before = await programState(database.db, id);
     expect(before).toMatchObject({ limitMinor: 80_000n, utilisedMinor: 60n });
     expect(await readDeadLetters(2)).toHaveLength(2);
     await stopApp();
 
     await admin.resetOffsets({ groupId, topic, earliest: true });
-    expect(await committed()).toBe(0);
+    expect([...(await committedOffsets()).values()].every((offset) => offset === 0n)).toBe(true);
     await startApp();
-    await eventually(committed, (count) => count === stream.length);
+    await allCommitted();
 
     expect(await programState(database.db, id)).toEqual(before);
     expect(await processedCount(id)).toBe(stream.length - 1);
@@ -174,11 +209,11 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
     await startApp();
 
     await produce([limitSet(`${id}-1`, id, 1, '1000'), limitSet(`${id}-3`, id, 3, '3000')]);
-    await eventually(committed, (count) => count === 2);
+    await allCommitted();
     expect((await programState(database.db, id)).limitMinor).toBe(1_000n);
 
     await produce([limitSet(`${id}-2`, id, 2, '2000'), snapshot(`${id}-stale`, id, 2, '1', [])]);
-    await eventually(committed, (count) => count === 4);
+    await allCommitted();
 
     expect((await programState(database.db, id)).limitMinor).toBe(3_000n);
     const stream = await database.db
@@ -200,17 +235,13 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
     await startApp();
 
     await produce(['{not json', JSON.stringify({ hello: 'world' })], id);
-    await producer.send({
-      topic,
-      acks: -1,
-      messages: [{ key: 'PRG-OTHER', value: JSON.stringify(limitSet(`${id}-x`, id, 1, '1')) }],
-    });
+    await send({ key: 'PRG-OTHER', value: JSON.stringify(limitSet(`${id}-x`, id, 1, '1')) });
     await produce([
       limitSet(`${id}-1`, id, 1, '1000'),
       limitSet(`${id}-2`, id, 2, '2000', 'EUR'),
       limitSet(`${id}-3`, id, 3, '3000'),
     ]);
-    await eventually(committed, (count) => count === 6);
+    await allCommitted();
 
     expect((await programState(database.db, id)).limitMinor).toBe(3_000n);
     const deadLetters = await readDeadLetters(4);
@@ -218,7 +249,7 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
     expect(
       deadLetters.find((record) => record.headers['x-dlq-reason']?.includes('does not match')),
     ).toBeDefined();
-    expect(deadLetters.map((record) => record.value)).toEqual(
+    expect(deadLetters.map((record) => record.text)).toEqual(
       expect.arrayContaining(['{not json', JSON.stringify({ hello: 'world' })]),
     );
     const rejected = deadLetters.find((record) => record.headers['x-message-id'] === `${id}-2`);
@@ -226,7 +257,7 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
       'x-original-topic': topic,
       'x-dlq-reason': expect.stringMatching(/currency/) as unknown,
     });
-    const unreadable = deadLetters.find((record) => record.value === '{not json');
+    const unreadable = deadLetters.find((record) => record.text === '{not json');
     expect(unreadable?.headers).toMatchObject({
       'x-original-topic': topic,
       'x-original-partition': expect.any(String) as unknown,
@@ -235,22 +266,101 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
     });
     const outbox = await database.db
       .selectFrom('treasury_dead_letters')
-      .select(['message_id', 'published_at'])
-      .orderBy('id')
+      .select(['message_id', 'source_partition', 'source_offset', 'published_at'])
       .execute();
-    expect(outbox).toEqual([
-      { message_id: null, published_at: expect.any(Date) },
-      { message_id: null, published_at: expect.any(Date) },
-      { message_id: null, published_at: expect.any(Date) },
-      { message_id: `${id}-2`, published_at: expect.any(Date) },
+    const sources = deadLetters.map((record) => ({
+      partition: Number(record.headers['x-original-partition']),
+      offset: record.headers['x-original-offset'],
+    }));
+    expect(outbox).toHaveLength(4);
+    expect(outbox.filter((row) => row.message_id !== null)).toEqual([
+      expect.objectContaining({ message_id: `${id}-2` }),
     ]);
+    for (const row of outbox) {
+      expect(row.published_at).toBeInstanceOf(Date);
+      expect(sources).toContainEqual({
+        partition: row.source_partition,
+        offset: row.source_offset,
+      });
+    }
   });
+
+  it('dead-letters the exact original bytes, including tombstones and invalid UTF-8', async () => {
+    const id = 'PRG-K-BYTES';
+    const semantic = Buffer.from(
+      `{ "messageId":"${id}-1", "programId":"${id}", "revision":1,\n  "type":"ProgramLimitSet", "occurredAt":"2026-11-18T10:00:00Z", "currency":"USD", "limit":"１００" }`,
+      'utf8',
+    );
+    const invalidUtf8 = Buffer.concat([
+      Buffer.from(`{"messageId":"${id}-2","programId":"${id}","note":"`, 'utf8'),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from('"}', 'utf8'),
+    ]);
+    await startApp();
+
+    await send({ key: id, value: semantic });
+    await send({ key: id, value: invalidUtf8 });
+    await send({ key: id, value: null });
+    await allCommitted();
+
+    const deadLetters = await readDeadLetters(3);
+    const byReason = (pattern: RegExp) =>
+      deadLetters.find((record) => pattern.test(record.headers['x-dlq-reason'] ?? ''));
+    expect(byReason(/Invalid ProgramLimitSet/)?.value).toEqual(semantic);
+    expect(byReason(/not valid UTF-8/)?.value).toEqual(invalidUtf8);
+    expect(byReason(/no value/)?.value).toBeNull();
+  });
+
+  it('applies a message exactly once when committing its offset fails', async () => {
+    const id = 'PRG-K-COMMIT';
+    const started = await startApp();
+    const treasuryConsumer: unknown = started.app.get(TreasuryConsumer);
+    const { consumer } = treasuryConsumer as { consumer: Consumer };
+    const commit = jest
+      .spyOn(consumer, 'commitOffsets')
+      .mockRejectedValueOnce(new Error('broker unavailable'));
+
+    await produce([limitSet(`${id}-1`, id, 1, '1000')]);
+    await allCommitted(30_000);
+
+    expect(commit.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(await programState(database.db, id)).toMatchObject({
+      limitMinor: 1_000n,
+      ledgerEntries: 1,
+    });
+    expect(await processedCount(id)).toBe(1);
+    commit.mockRestore();
+  });
+
+  it(`consumes a snapshot with the maximum ${MAX_SNAPSHOT_RESERVATIONS} reservations`, async () => {
+    const id = 'PRG-K-BULK';
+    const reservations = Array.from({ length: MAX_SNAPSHOT_RESERVATIONS }, (_, index) => ({
+      invoiceId: `INV-${String(index).padStart(60, '0')}`,
+      invoiceAmount: '999999999999',
+      invoiceCurrency: 'USD',
+      outstandingInvoiceAmount: '999999999999',
+      bookedAmount: '999999999999',
+    }));
+    const message = snapshot(`${id}-1`, id, 1, '9000000000000000000', reservations);
+    const bytes = Buffer.byteLength(JSON.stringify(message));
+    await startApp();
+
+    await produce([message]);
+    await allCommitted(120_000);
+
+    expect(bytes).toBeGreaterThan(8 * 1024 * 1024);
+    expect(await programState(database.db, id)).toMatchObject({
+      reservations: MAX_SNAPSHOT_RESERVATIONS,
+      utilisedMinor: 999_999_999_999n * BigInt(MAX_SNAPSHOT_RESERVATIONS),
+    });
+  }, 180_000);
 
   it('does not commit the offset while the database is unavailable', async () => {
     const id = 'PRG-K-OUTAGE';
     await startApp();
     await produce([limitSet(`${id}-1`, id, 1, '1000')]);
-    await eventually(committed, (count) => count === 1);
+    await allCommitted();
+    const beforeOutage = await committedOffsets();
 
     await withAdminClient(async (client) => {
       await client.query(`ALTER DATABASE "${database.name}" ALLOW_CONNECTIONS false`);
@@ -271,13 +381,13 @@ describe('Treasury Kafka consumer (Redpanda)', () => {
       (count) => count >= 2,
       30_000,
     );
-    expect(await committed()).toBe(1);
+    expect(await committedOffsets()).toEqual(beforeOutage);
     failures.mockRestore();
 
     await withAdminClient((client) =>
       client.query(`ALTER DATABASE "${database.name}" ALLOW_CONNECTIONS true`),
     );
-    await eventually(committed, (count) => count === 2, 30_000);
+    await allCommitted(30_000);
     expect((await programState(database.db, id)).limitMinor).toBe(2_000n);
   });
 });

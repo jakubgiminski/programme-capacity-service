@@ -37,4 +37,19 @@ describe('startHeartbeat', () => {
 
     await expect(settled).rejects.toThrow('rebalance in progress');
   });
+
+  it('signals the first failure so in-flight work can stop retrying', async () => {
+    const beat = jest
+      .fn<Promise<void>, []>()
+      .mockRejectedValueOnce(new Error('rebalance in progress'))
+      .mockRejectedValue(new Error('later failure'));
+    const heartbeat = startHeartbeat(beat, 1_000);
+    expect(heartbeat.failed.aborted).toBe(false);
+
+    await jest.advanceTimersByTimeAsync(2_000);
+
+    expect(heartbeat.failed.aborted).toBe(true);
+    expect(heartbeat.failed.reason).toEqual(new Error('rebalance in progress'));
+    heartbeat.stop();
+  });
 });

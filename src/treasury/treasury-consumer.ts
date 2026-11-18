@@ -18,8 +18,22 @@ import { KAFKA_HEALTH, type KafkaHealth } from './kafka-health';
 import { parseTreasuryMessage } from './treasury-messages';
 
 const INITIAL_BACKOFF_MS = 200;
-const OUTBOX_FLUSH_INTERVAL_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 3_000;
+
+export const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+function decodeValue(value: Buffer | null): string | null {
+  if (value === null) {
+    return null;
+  }
+  try {
+    return strictUtf8.decode(value);
+  } catch {
+    return null;
+  }
+}
 
 @Injectable()
 export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -27,7 +41,6 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
   private readonly consumer: Consumer;
   private readonly shutdown = new AbortController();
   private starting: Promise<void> | null = null;
-  private outboxTimer: NodeJS.Timeout | null = null;
 
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -39,6 +52,8 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
     this.consumer = kafka.consumer({
       groupId: config.KAFKA_GROUP_ID,
       allowAutoTopicCreation: false,
+      maxBytesPerPartition: MAX_MESSAGE_BYTES,
+      maxBytes: 2 * MAX_MESSAGE_BYTES,
     });
     this.consumer.on(this.consumer.events.GROUP_JOIN, () => {
       this.health.markUp();
@@ -60,17 +75,9 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
 
   async onApplicationShutdown(): Promise<void> {
     this.shutdown.abort();
-    if (this.outboxTimer !== null) {
-      clearInterval(this.outboxTimer);
-    }
     await this.starting;
     await this.consumer.disconnect();
-    await this.deadLetters.disconnect();
     this.health.markDown();
-  }
-
-  whenStarted(): Promise<void> {
-    return this.starting ?? Promise.resolve();
   }
 
   private async startWithRetry(): Promise<void> {
@@ -82,7 +89,7 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
       } catch (error) {
         this.logger.error({ err: error }, 'Failed to start treasury consumer, retrying');
         this.health.markDown();
-        const proceed = await this.pause(delay);
+        const proceed = await this.pause(delay, this.shutdown.signal);
         if (!proceed) {
           return;
         }
@@ -92,9 +99,9 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
   }
 
   private async start(): Promise<void> {
-    await this.ensureTopics();
-    await this.deadLetters.connect();
-    await this.flushOutbox();
+    if (this.config.KAFKA_CREATE_TOPICS) {
+      await this.ensureTopics();
+    }
     await this.consumer.connect();
     await this.consumer.subscribe({ topic: this.config.KAFKA_TOPIC, fromBeginning: true });
     await this.consumer.run({
@@ -102,10 +109,6 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
       partitionsConsumedConcurrently: this.config.KAFKA_PARTITIONS_CONSUMED_CONCURRENTLY,
       eachMessage: (payload) => this.handle(payload),
     });
-    this.outboxTimer = setInterval(() => {
-      void this.flushOutbox();
-    }, OUTBOX_FLUSH_INTERVAL_MS);
-    this.outboxTimer.unref();
   }
 
   private async ensureTopics(): Promise<void> {
@@ -115,7 +118,11 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
       const existing = new Set(await admin.listTopics());
       const missing = [this.config.KAFKA_TOPIC, this.config.KAFKA_DLQ_TOPIC]
         .filter((topic) => !existing.has(topic))
-        .map((topic) => ({ topic, numPartitions: this.config.KAFKA_TOPIC_PARTITIONS }));
+        .map((topic) => ({
+          topic,
+          numPartitions: this.config.KAFKA_TOPIC_PARTITIONS,
+          configEntries: [{ name: 'max.message.bytes', value: String(MAX_MESSAGE_BYTES) }],
+        }));
       if (missing.length > 0) {
         await admin.createTopics({ waitForLeaders: true, topics: missing });
       }
@@ -129,7 +136,7 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
     const source: MessageSource = { topic, partition, offset: message.offset };
     const heartbeat = startHeartbeat(() => payload.heartbeat(), HEARTBEAT_INTERVAL_MS);
     try {
-      await this.processWithRetry(message, source);
+      await this.processWithRetry(message, source, heartbeat.failed);
     } finally {
       heartbeat.stop();
     }
@@ -139,7 +146,12 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
     ]);
   }
 
-  private async processWithRetry(message: KafkaMessage, source: MessageSource): Promise<void> {
+  private async processWithRetry(
+    message: KafkaMessage,
+    source: MessageSource,
+    assignmentLost: AbortSignal,
+  ): Promise<void> {
+    const stop = AbortSignal.any([this.shutdown.signal, assignmentLost]);
     let delay = INITIAL_BACKOFF_MS;
     for (;;) {
       try {
@@ -150,7 +162,7 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
           { err: error, ...source },
           'Failed to process treasury message, retrying without committing',
         );
-        const proceed = await this.pause(delay);
+        const proceed = await this.pause(delay, stop);
         if (!proceed) {
           throw error;
         }
@@ -160,17 +172,22 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
   }
 
   private async process(message: KafkaMessage, source: MessageSource): Promise<void> {
-    const value = message.value ?? Buffer.alloc(0);
-    const rawValue = value.toString('utf8');
+    const rawValue = decodeValue(message.value);
+    if (rawValue === null) {
+      const reason =
+        message.value === null ? 'Message has no value' : 'Message value is not valid UTF-8';
+      await this.deadLetterUnreadable(message, source, reason);
+      return;
+    }
     const parsed = parseTreasuryMessage(rawValue);
     if (parsed.kind === 'unreadable') {
-      await this.deadLetterUnreadable(message, value, source, parsed.reason);
+      await this.deadLetterUnreadable(message, source, parsed.reason);
       return;
     }
     const key = message.key?.toString('utf8') ?? null;
     if (key !== parsed.envelope.programId) {
       const reason = `Message key ${JSON.stringify(key)} does not match programId ${parsed.envelope.programId}`;
-      await this.deadLetterUnreadable(message, value, source, reason);
+      await this.deadLetterUnreadable(message, source, reason);
       return;
     }
     const result = await this.applyMessage.execute({ parsed, rawValue, source });
@@ -188,37 +205,28 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
       'Treasury message handled',
     );
     if (result.deadLettered > 0) {
-      await this.flushOutbox();
+      this.deadLetters.notify();
     }
   }
 
   private async deadLetterUnreadable(
     message: KafkaMessage,
-    value: Buffer,
     source: MessageSource,
     reason: string,
   ): Promise<void> {
     const recorded = await this.deadLetters.recordUnreadable({
       key: message.key,
-      value,
+      value: message.value,
       reason,
       source,
     });
     this.logger.warn({ ...source, reason, recorded }, 'Unreadable treasury message dead-lettered');
-    await this.flushOutbox();
+    this.deadLetters.notify();
   }
 
-  private async flushOutbox(): Promise<void> {
+  private async pause(ms: number, signal: AbortSignal): Promise<boolean> {
     try {
-      await this.deadLetters.flushOutbox();
-    } catch (error) {
-      this.logger.error({ err: error }, 'Failed to flush dead-letter outbox; will retry');
-    }
-  }
-
-  private async pause(ms: number): Promise<boolean> {
-    try {
-      await sleep(ms, undefined, { signal: this.shutdown.signal });
+      await sleep(ms, undefined, { signal });
       return true;
     } catch {
       return false;

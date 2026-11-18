@@ -7,6 +7,8 @@ import {
   positiveMinorUnitsSchema,
 } from '../money';
 
+export const MAX_SNAPSHOT_RESERVATIONS = 50_000;
+
 export const TreasuryMessageType = {
   ProgramLimitSet: 'ProgramLimitSet',
   InvoiceRepaid: 'InvoiceRepaid',
@@ -58,7 +60,7 @@ const programSnapshotSchema = z
     currency: currencySchema,
     limit: nonNegativeMinorUnitsSchema,
     asOf: z.iso.datetime({ offset: true }),
-    reservations: z.array(snapshotReservationSchema).max(100_000),
+    reservations: z.array(snapshotReservationSchema).max(MAX_SNAPSHOT_RESERVATIONS),
   })
   .superRefine((snapshot, context) => {
     const seen = new Set<string>();

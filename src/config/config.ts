@@ -32,6 +32,11 @@ const baseSchema = z.object({
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
   KAFKA_ENABLED: booleanFlag.default(true),
   KAFKA_BROKERS: csv.default(['localhost:19092']),
+  KAFKA_SSL: booleanFlag.default(false),
+  KAFKA_SASL_MECHANISM: z.enum(['plain', 'scram-sha-256', 'scram-sha-512']).optional(),
+  KAFKA_SASL_USERNAME: z.string().min(1).optional(),
+  KAFKA_SASL_PASSWORD: z.string().min(1).optional(),
+  KAFKA_CREATE_TOPICS: booleanFlag.default(true),
   KAFKA_CLIENT_ID: z.string().min(1).default('programme-capacity-service'),
   KAFKA_GROUP_ID: z.string().min(1).default('programme-capacity-service'),
   KAFKA_TOPIC: z.string().min(1).default('treasury.program-capacity.v1'),
@@ -58,6 +63,25 @@ export const configSchema = baseSchema.superRefine((config, context) => {
       code: 'custom',
       path: ['JWT_JWKS_URL'],
       message: 'JWT_JWKS_URL must use https in production',
+    });
+  }
+  const saslSettings = [
+    config.KAFKA_SASL_MECHANISM,
+    config.KAFKA_SASL_USERNAME,
+    config.KAFKA_SASL_PASSWORD,
+  ];
+  if (new Set(saslSettings.map((setting) => setting === undefined)).size > 1) {
+    context.addIssue({
+      code: 'custom',
+      path: ['KAFKA_SASL_MECHANISM'],
+      message: 'Set KAFKA_SASL_MECHANISM, KAFKA_SASL_USERNAME and KAFKA_SASL_PASSWORD together',
+    });
+  }
+  if (config.KAFKA_TOPIC === config.KAFKA_DLQ_TOPIC) {
+    context.addIssue({
+      code: 'custom',
+      path: ['KAFKA_DLQ_TOPIC'],
+      message: 'KAFKA_DLQ_TOPIC must differ from KAFKA_TOPIC',
     });
   }
   if (keySources.filter((source) => source !== undefined).length !== 1) {

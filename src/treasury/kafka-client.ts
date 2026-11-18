@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { Kafka, logLevel, type logCreator } from 'kafkajs';
+import { Kafka, logLevel, type logCreator, type SASLOptions } from 'kafkajs';
 import { type AppConfig } from '../config/config';
 
 export const KAFKA = Symbol('KAFKA');
@@ -25,10 +25,24 @@ const kafkaLogCreator: logCreator = () => {
   };
 };
 
+function sasl(config: AppConfig): SASLOptions | undefined {
+  const mechanism = config.KAFKA_SASL_MECHANISM;
+  if (mechanism === undefined) {
+    return undefined;
+  }
+  return {
+    mechanism,
+    username: config.KAFKA_SASL_USERNAME ?? '',
+    password: config.KAFKA_SASL_PASSWORD ?? '',
+  };
+}
+
 export function createKafka(config: AppConfig): Kafka {
   return new Kafka({
     clientId: config.KAFKA_CLIENT_ID,
     brokers: config.KAFKA_BROKERS,
+    ssl: config.KAFKA_SSL,
+    sasl: sasl(config),
     logLevel: logLevel.WARN,
     logCreator: kafkaLogCreator,
     retry: { initialRetryTime: 300, retries: 8 },
