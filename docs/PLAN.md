@@ -228,3 +228,6 @@ Each step ends with green lint, typecheck and tests, conventional commits, and a
 - Added `reservations.invoice_released_minor` and `releases.requested_invoice_amount_minor` for cumulative partial releases and exact release-idempotency comparison.
 - Treasury writers take a per-programme advisory lock before the programme row lock, because a treasury message may create the programme.
 - A snapshot's limit change is ledgered as `LIMIT_SET` (reason `SNAPSHOT_LIMIT`); reservation adjustments as `RECONCILE_ADJUST`.
+- Release rows store the reservation state they produced (`sequence`, `status_after`, `invoice_released_after_minor`, `booked_after_minor`, `released_after_minor`), so an idempotent replay returns the original response even after later releases. `RELEASED` means the full invoice amount has been repaid. Migration 0001 was amended in place (pre-release).
+- HTTP bodies are read as raw buffers and parsed as JSON by the route after the auth guard runs; non-JSON or non-UTF-8 bodies are 415, bodies over 64 kB are 413.
+- `/health` returns a 503 problem document (with `checks`) when a dependency is down; an unreachable JWKS endpoint is a 503 `authentication-unavailable` problem rather than a 401.

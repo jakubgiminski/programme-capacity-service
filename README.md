@@ -67,7 +67,7 @@ Errors are `application/problem+json` (RFC 7807) with `type`, `title`, `status`,
 | `GET /v1/programs/:programId/discrepancies`                     | `capacity:read`  | open reconciliation discrepancies                                                 |
 | `GET /health`                                                   | `capacity:read`  | database and Kafka status; 503 when either is down                                |
 
-400 validation · 401 missing/invalid token · 403 missing scope · 404 unknown programme/reservation · 409 invoice conflict, insufficient capacity, release conflict, already released · 422 missing FX pair, over-release, wrong release currency.
+400 validation or malformed JSON · 401 missing/invalid token · 403 missing scope · 404 unknown programme/reservation · 409 invoice conflict, insufficient capacity, release conflict, already released · 413 body over 64 kB · 415 body not UTF-8 `application/json` · 422 missing FX pair, over-release, wrong release currency · 503 database/Kafka down (`/health`) or JWKS unreachable.
 
 ## Treasury messages
 
@@ -100,7 +100,7 @@ Tests: unit and property tests for money, FX, release allocation, ordering and e
 
 - **Money** is `bigint` minor units end to end (`BIGINT` in Postgres, strings in JSON), ISO 4217 exponents (JPY 0, KWD 3). Amounts, aggregates and conversions are range-checked against `BIGINT`.
 - **FX** rates are decimal strings scaled by 10^10; 1 unit of invoice currency = `rate` units of programme currency. Conversion rounds once, **up** for reservations (conservative). The rate, source and `asOf` are locked on the reservation; releases never re-convert. The static provider has explicit pairs only (no derived inverses); a missing pair is 422.
-- **Partial releases** free `floor(booked × cumulativeInvoiceReleased / invoiceAmount) − alreadyFreed`; the final release frees whatever remains, so nothing is stranded or over-freed.
+- **Partial releases** free `floor(booked × cumulativeInvoiceReleased / invoiceAmount) − alreadyFreed`; the final release frees whatever remains, so nothing is stranded or over-freed. A reservation is `RELEASED` once its full invoice amount is repaid. Each release stores the reservation state it produced, so a replayed release returns its original response even after later releases.
 - **Concurrency**: every write runs in one transaction that first locks the programme row (`SELECT … FOR UPDATE`), then reads/writes reservations, then updates the programme and appends the ledger. One lock order for HTTP and Kafka: no lost updates, no deadlocks. Idempotency is checked under the lock and before fetching FX, so a retry after a rate change returns the original booking.
 - **Audit**: append-only `ledger_entries` (enforced by a trigger) with actor (JWT `sub` or `treasury`), correlation ID, source message ID and reason. Invariant `utilised = Σ(booked − released)` over open reservations is asserted by the tests. Programme currency is immutable (trigger).
 - **Kafka delivery**: auto-commit off; an offset is committed only after the message's DB transaction commits (or, for unreadable messages, after the DLQ publish is acknowledged). Transient failures retry with capped backoff without committing. Dedupe on `messageId` plus revision ordering make replays, rebalances and crash-restarts no-ops.
@@ -120,7 +120,7 @@ Tests: unit and property tests for money, FX, release allocation, ordering and e
 
   Discrepancies stay open until a later snapshot no longer reports them.
 
-- **Auth**: RS256 JWT verified with `jose` (`iss`, `aud`, `exp`, `sub` required; RS256 only) in a global guard; routes without a declared scope are denied. Callers are trusted internal services: no per-programme authorisation. Production would use the IdP's JWKS (`JWT_JWKS_URL`).
+- **Auth**: RS256 JWT verified with `jose` (`iss`, `aud`, `exp`, `sub` required; RS256 only) in a global guard; routes without a declared scope are denied. Request bodies are parsed only after authentication; an unreachable JWKS endpoint is a 503, not a 401. Callers are trusted internal services: no per-programme authorisation. Production would use the IdP's JWKS (`JWT_JWKS_URL`).
 - **Programmes** are created by treasury (`ProgramLimitSet` or `ProgramSnapshot`) or the local seed; there is no HTTP endpoint for them.
 - **Real-time** availability is served by polling `GET /capacity`; `version` changes on every capacity mutation.
 
@@ -131,6 +131,7 @@ Deviations from the plan, kept minimal:
 - `reservations.invoice_released_minor` and `releases.requested_invoice_amount_minor` were added to support cumulative partial releases and exact release-idempotency comparison.
 - A snapshot's limit change is ledgered as `LIMIT_SET` (reason `SNAPSHOT_LIMIT`); reservation adjustments are `RECONCILE_ADJUST`.
 - Deltas for a programme that does not exist yet are parked by revision like any other gap; an `InvoiceRepaid` for an unknown programme is dead-lettered.
+- Release rows also store the resulting reservation state (`sequence`, `status_after`, cumulative amounts) so replays return the original result. Migrations were amended in place because nothing has been deployed yet.
 
 ## Next steps for production
 
