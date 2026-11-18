@@ -8,8 +8,8 @@ Stack: Node 22, TypeScript (strict), NestJS 11, PostgreSQL 16 (Kysely), kafkajs 
 
 ```bash
 docker compose up --build -d
-TOKEN=$(docker compose exec -T app node dist/scripts/dev-token.js)
-curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/health
+until TOKEN=$(docker compose exec -T app node dist/scripts/dev-token.js 2>/dev/null) &&
+  curl -fs -H "Authorization: Bearer $TOKEN" localhost:3000/health; do sleep 2; done
 # {"status":"ok","checks":{"database":"up","kafka":"up"}}
 ```
 
@@ -44,6 +44,7 @@ curl -s -H "$H" -H "$J" $P/reservations \
 # 409 /problems/insufficient-capacity with "requested" and "available"
 
 docker compose exec -T app node dist/scripts/produce-sample-messages.js snapshot-usd
+# consumption is asynchronous: repeat the next call until the limit shows 900000000
 curl -s -H "$H" $P/capacity        # limit 900000000, utilised 31510000, openDiscrepancies 1
 curl -s -H "$H" $P/discrepancies   # INV-1001 TREASURY_AMOUNT_LOWER: kept local 6510000, treasury says 5000000
 # TRE-9001 was imported as a TREASURY reservation. Re-sending the snapshot changes nothing (same messageId).
@@ -100,11 +101,12 @@ Tests: unit and property tests for money, FX, release allocation, ordering and e
 
 - **Money** is `bigint` minor units end to end (`BIGINT` in Postgres, strings in JSON), ISO 4217 exponents (JPY 0, KWD 3). Amounts, aggregates and conversions are range-checked against `BIGINT`.
 - **FX** rates are decimal strings scaled by 10^10; 1 unit of invoice currency = `rate` units of programme currency. Conversion rounds once, **up** for reservations (conservative). The rate, source and `asOf` are locked on the reservation; releases never re-convert. The static provider has explicit pairs only (no derived inverses); a missing pair is 422.
-- **Partial releases** free `floor(booked × cumulativeInvoiceReleased / invoiceAmount) − alreadyFreed`; the final release frees whatever remains, so nothing is stranded or over-freed. A reservation is `RELEASED` once its full invoice amount is repaid. Each release stores the reservation state it produced, so a replayed release returns its original response even after later releases.
+- **Partial releases** free `floor(booked × cumulativeInvoiceReleased / invoiceAmount) − alreadyFreed`; the final release frees whatever remains, so nothing is stranded or over-freed. When a snapshot rebooks a reservation, later repayments are allocated against the remaining invoice amount and the new outstanding booking. A reservation is `RELEASED` once its full invoice amount is repaid. Each release stores the reservation state it produced, so a replayed release returns its original response even after later releases.
 - **Concurrency**: every write runs in one transaction that first locks the programme row (`SELECT … FOR UPDATE`), then reads/writes reservations, then updates the programme and appends the ledger. One lock order for HTTP and Kafka: no lost updates, no deadlocks. Idempotency is checked under the lock and before fetching FX, so a retry after a rate change returns the original booking.
 - **Audit**: append-only `ledger_entries` (enforced by a trigger) with actor (JWT `sub` or `treasury`), correlation ID, source message ID and reason. Invariant `utilised = Σ(booked − released)` over open reservations is asserted by the tests. Programme currency is immutable (trigger).
-- **Kafka delivery**: auto-commit off; an offset is committed only after the message's DB transaction commits (or, for unreadable messages, after the DLQ publish is acknowledged). Transient failures retry with capped backoff without committing. Dedupe on `messageId` plus revision ordering make replays, rebalances and crash-restarts no-ops.
-- **Ordering**: stale revisions are skipped, gaps are parked and drained once contiguous, a snapshot newer than the applied revision is applied and supersedes parked messages it covers. A per-programme advisory lock serialises a programme's stream even before its row exists (a treasury message may create the programme).
+- **Kafka delivery**: auto-commit off; an offset is committed only after the message's DB transaction commits. Transient failures retry with capped backoff without committing, heartbeating throughout. Dedupe on `messageId` plus revision ordering make replays, rebalances and crash-restarts no-ops. The record key must equal the envelope's `programId`.
+- **DLQ**: every dead letter (rejected, unreadable or key mismatch) is written to a `treasury_dead_letters` outbox keyed by its source topic/partition/offset, then published with its original bytes. A replay never adds a second entry; publishing is at-least-once, so consumers dedupe on the `x-original-topic/partition/offset` headers.
+- **Ordering**: a per-programme cursor (`treasury_streams`, locked first) records the last consumed revision, even before the programme exists. Stale revisions are skipped, gaps are parked and drained once contiguous, and a snapshot newer than the cursor is applied and supersedes parked messages it covers. A rejected message advances the cursor when contiguous; a snapshot rejected ahead of a gap leaves a marker that is consumed when the gap closes. Whether a programme exists is checked when a message becomes eligible to apply.
 - **Fail-safe merge**: a snapshot may raise utilisation freely but may only lower it for reservations treasury itself introduced:
 
   | Scenario                             | Outcome                                                                                                  |
@@ -127,7 +129,10 @@ Tests: unit and property tests for money, FX, release allocation, ordering and e
 Deviations from the plan, kept minimal:
 
 - NestJS 11, Kysely 0.28 and jose 5 (CommonJS builds) instead of the latest ESM-only majors, so Jest runs without ESM workarounds.
-- Semantic rejections (unknown invoice, currency change, over-release, invalid body) are written to a `treasury_dead_letters` outbox in the same transaction and published to the DLQ after commit, so a crash cannot lose a dead letter or skip a revision. DLQ delivery is at-least-once (`x-message-id` header for dedupe). A rejected message advances the programme's revision only when it is the next contiguous one.
+- Dead letters go through a `treasury_dead_letters` outbox written in the consuming transaction (semantic rejections) or before the offset commit (unreadable records), so a crash cannot lose one and a replay cannot duplicate one.
+- The ordering cursor lives in `treasury_streams` instead of `programs.treasury_revision`, and its row lock replaces the advisory lock, so streams whose first message is rejected or whose programme does not exist yet still advance.
+- Reservations carry an allocation base (`allocation_base_*`) that a reconciliation rebook resets, so proportional releases never apply a new booking retroactively.
+- Reconciliation applies utilisation decreases before increases (then by invoice ID) so intermediate ledger totals stay within `BIGINT`; snapshot inserts and ledger writes are chunked.
 - `reservations.invoice_released_minor` and `releases.requested_invoice_amount_minor` were added to support cumulative partial releases and exact release-idempotency comparison.
 - A snapshot's limit change is ledgered as `LIMIT_SET` (reason `SNAPSHOT_LIMIT`); reservation adjustments are `RECONCILE_ADJUST`.
 - Deltas for a programme that does not exist yet are parked by revision like any other gap; an `InvoiceRepaid` for an unknown programme is dead-lettered.

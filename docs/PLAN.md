@@ -224,9 +224,13 @@ Each step ends with green lint, typecheck and tests, conventional commits, and a
 ## 14. Deviations recorded during implementation
 
 - NestJS 11, Kysely 0.28 and jose 5 (CommonJS builds) instead of the latest ESM-only majors, so Jest runs without ESM workarounds.
-- Semantic rejections are written to a `treasury_dead_letters` outbox in the same transaction as the dedupe record and published to the DLQ after commit; only unreadable messages (invalid JSON or envelope) are published directly before the offset commit. A rejected message advances the revision only when it is the next contiguous one.
+- Every dead letter goes through a `treasury_dead_letters` outbox, unique on source topic/partition/offset and storing the original bytes. Semantic rejections are written in the consuming transaction. Unreadable records and records whose key does not match `programId` are written before the offset commit. Rows are published one at a time with attempt tracking, so one bad row cannot block the rest. A rejected message advances the cursor when it is contiguous. A snapshot rejected ahead of a gap is parked as a marker that the drain consumes when the gap closes.
 - Added `reservations.invoice_released_minor` and `releases.requested_invoice_amount_minor` for cumulative partial releases and exact release-idempotency comparison.
-- Treasury writers take a per-programme advisory lock before the programme row lock, because a treasury message may create the programme.
+- The ordering cursor is a `treasury_streams` row per programme rather than `programs.treasury_revision`. Treasury writers lock it before the programme row; it exists even before the programme, so a rejected first message still advances it.
+- Reservations store an allocation base (`allocation_base_invoice_minor`, `allocation_base_released_minor`) that a reconciliation rebook resets. Later partial releases are allocated as `base + floor((booked − base) × (cumInvoice − baseInvoice) / (invoiceAmount − baseInvoice))`.
+- Reconciliation applies utilisation decreases before increases. Imports and ledger entries are inserted in chunks, and ID lookups use array binds, so bulk snapshots stay under PostgreSQL's bind-parameter limit.
+- Treasury message bodies are strict: unknown fields reject the message. The envelope `type` must be alphanumeric, otherwise the record is unreadable.
+- Connections set `lock_timeout` (10 s) and `statement_timeout` (60 s); HTTP maps those timeouts to 503.
 - A snapshot's limit change is ledgered as `LIMIT_SET` (reason `SNAPSHOT_LIMIT`); reservation adjustments as `RECONCILE_ADJUST`.
 - Release rows store the reservation state they produced (`sequence`, `status_after`, `invoice_released_after_minor`, `booked_after_minor`, `released_after_minor`), so an idempotent replay returns the original response even after later releases. `RELEASED` means the full invoice amount has been repaid. Migration 0001 was amended in place (pre-release).
 - HTTP bodies are read as raw buffers and parsed as JSON by the route after the auth guard runs; non-JSON or non-UTF-8 bodies are 415, bodies over 64 kB are 413.
