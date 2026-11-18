@@ -12,6 +12,7 @@ import { type MessageSource } from '../capacity/infrastructure/treasury.reposito
 import { type AppConfig } from '../config/config';
 import { APP_CONFIG } from '../config/config.module';
 import { DeadLetterPublisher } from './dead-letter-publisher';
+import { startHeartbeat } from './heartbeat';
 import { KAFKA } from './kafka-client';
 import { KAFKA_HEALTH, type KafkaHealth } from './kafka-health';
 import { parseTreasuryMessage } from './treasury-messages';
@@ -19,11 +20,6 @@ import { parseTreasuryMessage } from './treasury-messages';
 const INITIAL_BACKOFF_MS = 200;
 const OUTBOX_FLUSH_INTERVAL_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 3_000;
-
-interface Heartbeat {
-  assertAlive(): void;
-  stop(): void;
-}
 
 @Injectable()
 export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -131,35 +127,16 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
   private async handle(payload: EachMessagePayload): Promise<void> {
     const { topic, partition, message } = payload;
     const source: MessageSource = { topic, partition, offset: message.offset };
-    const heartbeat = this.keepAlive(payload);
+    const heartbeat = startHeartbeat(() => payload.heartbeat(), HEARTBEAT_INTERVAL_MS);
     try {
       await this.processWithRetry(message, source);
-      heartbeat.assertAlive();
     } finally {
       heartbeat.stop();
     }
+    await heartbeat.settle();
     await this.consumer.commitOffsets([
       { topic, partition, offset: (BigInt(message.offset) + 1n).toString() },
     ]);
-  }
-
-  private keepAlive(payload: EachMessagePayload): Heartbeat {
-    let failure: Error | null = null;
-    const timer = setInterval(() => {
-      payload.heartbeat().catch((error: unknown) => {
-        failure ??= error instanceof Error ? error : new Error(String(error));
-      });
-    }, HEARTBEAT_INTERVAL_MS);
-    return {
-      assertAlive: () => {
-        if (failure !== null) {
-          throw failure;
-        }
-      },
-      stop: () => {
-        clearInterval(timer);
-      },
-    };
   }
 
   private async processWithRetry(message: KafkaMessage, source: MessageSource): Promise<void> {
