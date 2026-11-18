@@ -24,7 +24,8 @@
     "keys:dev": "tsx --env-file-if-exists=.env scripts/dev-keys.ts",
     "token:dev": "tsx --env-file-if-exists=.env scripts/dev-token.ts",
     "db:seed": "tsx --env-file-if-exists=.env scripts/seed.ts",
-    "kafka:sample": "tsx --env-file-if-exists=.env scripts/produce-sample-messages.ts"
+    "kafka:sample": "tsx --env-file-if-exists=.env scripts/produce-sample-messages.ts",
+    "smoke": "tsx --env-file-if-exists=.env scripts/smoke.ts"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
