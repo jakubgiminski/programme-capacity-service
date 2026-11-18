@@ -32,7 +32,7 @@ import {
 } from '../infrastructure/treasury.repository';
 import { ReleaseProcessor } from './release-processor';
 
-export const TREASURY_ACTOR = 'treasury';
+const TREASURY_ACTOR = 'treasury';
 
 const DRAIN_BATCH = 100;
 

@@ -52,7 +52,7 @@ const baseSchema = z.object({
   JWT_JWKS_URL: z.url({ protocol: /^https?$/ }).optional(),
 });
 
-export const configSchema = baseSchema.superRefine((config, context) => {
+const configSchema = baseSchema.superRefine((config, context) => {
   const keySources = [config.JWT_PUBLIC_KEY, config.JWT_PUBLIC_KEY_FILE, config.JWT_JWKS_URL];
   if (
     config.NODE_ENV === 'production' &&

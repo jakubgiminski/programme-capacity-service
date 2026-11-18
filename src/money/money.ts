@@ -11,7 +11,7 @@ export interface MoneyJson {
   currency: string;
 }
 
-export function assertInt64(value: bigint): bigint {
+function assertInt64(value: bigint): bigint {
   if (value > INT64_MAX || value < INT64_MIN) {
     throw new AmountOutOfRangeError(`Amount ${value} is outside the supported 64-bit range`);
   }

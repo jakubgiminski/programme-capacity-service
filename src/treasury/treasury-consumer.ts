@@ -20,7 +20,7 @@ import { parseTreasuryMessage } from './treasury-messages';
 const INITIAL_BACKOFF_MS = 200;
 const HEARTBEAT_INTERVAL_MS = 3_000;
 
-export const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 
 const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 

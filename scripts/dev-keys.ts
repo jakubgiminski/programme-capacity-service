@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import { runScript } from './script-runner';
 
-export function devKeysDir(): string {
+function devKeysDir(): string {
   return process.env.DEV_KEYS_DIR ?? '.dev-keys';
 }
 
@@ -51,7 +51,7 @@ function publishAtomically(target: string, content: string, mode: number): void 
   renameSync(temporary, target);
 }
 
-export async function ensureDevKeys(directory = devKeysDir()): Promise<boolean> {
+async function ensureDevKeys(directory = devKeysDir()): Promise<boolean> {
   const privatePath = privateKeyPath(directory);
   const publicPath = join(directory, 'public.pem');
   mkdirSync(directory, { recursive: true, mode: 0o700 });

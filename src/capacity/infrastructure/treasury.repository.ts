@@ -94,7 +94,7 @@ export interface SnapshotReference {
   readonly revision: bigint;
 }
 
-export function storableText(text: string): string {
+function storableText(text: string): string {
   return text.replaceAll('\u0000', '\uFFFD');
 }
 
