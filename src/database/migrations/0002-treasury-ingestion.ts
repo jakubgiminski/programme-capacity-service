@@ -2,6 +2,14 @@ import { type Kysely, sql } from 'kysely';
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
+    CREATE TABLE treasury_streams (
+      program_id text PRIMARY KEY,
+      revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `.execute(db);
+
+  await sql`
     CREATE TABLE processed_messages (
       message_id text PRIMARY KEY,
       program_id text NOT NULL,
@@ -24,6 +32,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       program_id text NOT NULL,
       revision bigint NOT NULL CHECK (revision > 0),
       raw_value text NOT NULL,
+      rejected boolean NOT NULL DEFAULT false,
       source_topic text NOT NULL,
       source_partition integer NOT NULL,
       source_offset text NOT NULL,
@@ -39,18 +48,23 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       program_id text,
       revision bigint,
       reason text NOT NULL,
-      raw_value text NOT NULL,
+      message_key bytea,
+      payload bytea NOT NULL,
       source_topic text NOT NULL,
       source_partition integer NOT NULL,
       source_offset text NOT NULL,
+      attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+      last_error text,
       created_at timestamptz NOT NULL DEFAULT now(),
-      published_at timestamptz
+      published_at timestamptz,
+      CONSTRAINT treasury_dead_letters_source_unique
+        UNIQUE (source_topic, source_partition, source_offset)
     )
   `.execute(db);
 
   await sql`
     CREATE INDEX treasury_dead_letters_unpublished
-      ON treasury_dead_letters (id) WHERE published_at IS NULL
+      ON treasury_dead_letters (attempts, id) WHERE published_at IS NULL
   `.execute(db);
 
   await sql`
@@ -84,4 +98,5 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DROP TABLE treasury_dead_letters`.execute(db);
   await sql`DROP TABLE pending_treasury_messages`.execute(db);
   await sql`DROP TABLE processed_messages`.execute(db);
+  await sql`DROP TABLE treasury_streams`.execute(db);
 }

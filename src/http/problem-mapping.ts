@@ -1,4 +1,5 @@
 import { HttpException, HttpStatus } from '@nestjs/common';
+import { DatabaseError } from 'pg';
 import {
   AuthenticationError,
   AuthorizationError,
@@ -75,6 +76,16 @@ function capacityProblem(error: CapacityError): Problem {
   return problem;
 }
 
+const DATABASE_TIMEOUT_CODES = new Set(['55P03', '57014']);
+
+function isDatabaseTimeout(error: unknown): boolean {
+  return (
+    error instanceof DatabaseError &&
+    error.code !== undefined &&
+    DATABASE_TIMEOUT_CODES.has(error.code)
+  );
+}
+
 export function toProblem(error: unknown): Problem {
   if (error instanceof CapacityError) {
     return capacityProblem(error);
@@ -111,6 +122,14 @@ export function toProblem(error: unknown): Problem {
       status: 503,
       detail: error.message,
       ...error.extensions,
+    };
+  }
+  if (isDatabaseTimeout(error)) {
+    return {
+      type: problemType('service-unavailable'),
+      title: titleFor(503),
+      status: 503,
+      detail: 'The request timed out waiting for the database; retry later',
     };
   }
   if (error instanceof KeyServiceUnavailableError) {

@@ -100,12 +100,15 @@ function cumulativeReleasedBooking(reservation: Reservation, invoiceReleasedAfte
   if (invoiceReleasedAfter === reservation.invoiceAmountMinor) {
     return reservation.bookedMinor;
   }
-  const share = proportionalShare(
-    reservation.bookedMinor,
-    invoiceReleasedAfter,
-    reservation.invoiceAmountMinor,
-    'DOWN',
-  );
+  const base = reservation.allocationBase;
+  const share =
+    base.releasedMinor +
+    proportionalShare(
+      reservation.bookedMinor - base.releasedMinor,
+      invoiceReleasedAfter - base.invoiceReleasedMinor,
+      reservation.invoiceAmountMinor - base.invoiceReleasedMinor,
+      'DOWN',
+    );
   return share < reservation.releasedMinor ? reservation.releasedMinor : share;
 }
 

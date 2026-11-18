@@ -13,7 +13,6 @@ export interface ProgramsTable {
   limit_minor: bigint;
   utilised_minor: Generated<bigint>;
   version: Generated<bigint>;
-  treasury_revision: Generated<bigint>;
   created_at: CreatedAt;
   updated_at: UpdatedAt;
 }
@@ -29,6 +28,8 @@ export interface ReservationsTable {
   invoice_released_minor: Generated<bigint>;
   booked_minor: bigint;
   released_minor: Generated<bigint>;
+  allocation_base_invoice_minor: Generated<bigint>;
+  allocation_base_released_minor: Generated<bigint>;
   fx_rate: bigint | null;
   fx_scale: number | null;
   fx_source: string | null;
@@ -92,10 +93,17 @@ export interface PendingTreasuryMessagesTable {
   program_id: string;
   revision: bigint;
   raw_value: string;
+  rejected: Generated<boolean>;
   source_topic: string;
   source_partition: number;
   source_offset: string;
   received_at: CreatedAt;
+}
+
+export interface TreasuryStreamsTable {
+  program_id: string;
+  revision: Generated<bigint>;
+  updated_at: UpdatedAt;
 }
 
 export interface TreasuryDeadLettersTable {
@@ -104,10 +112,13 @@ export interface TreasuryDeadLettersTable {
   program_id: string | null;
   revision: bigint | null;
   reason: string;
-  raw_value: string;
+  message_key: Buffer | null;
+  payload: Buffer;
   source_topic: string;
   source_partition: number;
   source_offset: string;
+  attempts: Generated<number>;
+  last_error: string | null;
   created_at: CreatedAt;
   published_at: Date | null;
 }
@@ -135,6 +146,7 @@ export interface Database {
   ledger_entries: LedgerEntriesTable;
   processed_messages: ProcessedMessagesTable;
   pending_treasury_messages: PendingTreasuryMessagesTable;
+  treasury_streams: TreasuryStreamsTable;
   treasury_dead_letters: TreasuryDeadLettersTable;
   reconciliation_discrepancies: ReconciliationDiscrepanciesTable;
 }

@@ -1,6 +1,6 @@
 import { INT64_MAX, parseCurrency } from '../../money';
 import { AmountOutOfRangeCapacityError } from './errors';
-import { type Program, type Reservation } from './model';
+import { type Program, type Reservation, ZERO_ALLOCATION_BASE } from './model';
 import { planReconciliation, type SnapshotReservation } from './reconciliation';
 
 const USD = parseCurrency('USD');
@@ -13,7 +13,6 @@ function program(overrides: Partial<Program> = {}): Program {
     limitMinor: 10_000n,
     utilisedMinor: 0n,
     version: 3n,
-    treasuryRevision: 4n,
     createdAt: new Date(0),
     updatedAt: new Date(0),
     ...overrides,
@@ -32,6 +31,7 @@ function reservation(overrides: Partial<Reservation> = {}): Reservation {
     invoiceReleasedMinor: 0n,
     bookedMinor: 1_100n,
     releasedMinor: 0n,
+    allocationBase: ZERO_ALLOCATION_BASE,
     fx: null,
     createdAt: new Date(0),
     updatedAt: new Date(0),
@@ -271,6 +271,44 @@ describe('planReconciliation (fail-safe merge)', () => {
       result.changes.map((change) => (change.kind === 'import' ? change.entry.invoiceId : '')),
     ).toEqual(['A', 'C']);
     expect(result.discrepancies.map((item) => item.invoiceId)).toEqual(['B', 'D']);
+  });
+
+  it('applies utilisation decreases before increases so no intermediate total overflows', () => {
+    const result = planReconciliation(
+      program({ limitMinor: INT64_MAX, utilisedMinor: INT64_MAX }),
+      [reservation({ invoiceId: 'Z', origin: 'TREASURY', bookedMinor: INT64_MAX })],
+      {
+        limitMinor: INT64_MAX,
+        reservations: [
+          entry({ invoiceId: 'A', bookedMinor: 1n }),
+          entry({ invoiceId: 'Z', invoiceAmountMinor: 1_000n, bookedMinor: INT64_MAX - 1n }),
+        ],
+      },
+    );
+
+    expect(result.changes.map((change) => change.deltaMinor)).toEqual([-1n, 1n]);
+    expect(result.utilisedAfterMinor).toBe(INT64_MAX);
+  });
+
+  it('starts a new allocation base when it rebooks a partially released reservation', () => {
+    const result = plan(
+      [
+        reservation({
+          origin: 'TREASURY',
+          status: 'PARTIALLY_RELEASED',
+          invoiceReleasedMinor: 500n,
+          releasedMinor: 550n,
+        }),
+      ],
+      [entry({ bookedMinor: 1_000n })],
+    );
+
+    expect(result.changes).toEqual([
+      expect.objectContaining({
+        bookedAfterMinor: 1_550n,
+        allocationBase: { invoiceReleasedMinor: 500n, releasedMinor: 550n },
+      }),
+    ]);
   });
 
   it('rejects a snapshot that would overflow BIGINT utilisation', () => {

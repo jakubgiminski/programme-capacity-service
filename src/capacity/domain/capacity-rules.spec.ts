@@ -8,7 +8,7 @@ import {
   ReleaseCurrencyMismatchError,
   ReservationAlreadyReleasedError,
 } from './errors';
-import { type Program, type Reservation } from './model';
+import { type Program, type Reservation, ZERO_ALLOCATION_BASE } from './model';
 
 const USD = parseCurrency('USD');
 const EUR = parseCurrency('EUR');
@@ -21,7 +21,6 @@ function program(overrides: Partial<Program> = {}): Program {
     limitMinor: 1_000_000n,
     utilisedMinor: 0n,
     version: 0n,
-    treasuryRevision: 0n,
     createdAt: new Date(0),
     updatedAt: new Date(0),
     ...overrides,
@@ -40,6 +39,7 @@ function reservation(overrides: Partial<Reservation> = {}): Reservation {
     invoiceReleasedMinor: 0n,
     bookedMinor: 1_000n,
     releasedMinor: 0n,
+    allocationBase: ZERO_ALLOCATION_BASE,
     fx: null,
     createdAt: new Date(0),
     updatedAt: new Date(0),
@@ -165,6 +165,25 @@ describe('planRelease', () => {
 
     expect(plan.freedMinor).toBe(0n);
     expect(plan.releasedAfterMinor).toBe(500n);
+  });
+
+  it('allocates repayments after a reconciliation against the remaining invoice and exposure', () => {
+    const rebooked = reservation({
+      status: 'PARTIALLY_RELEASED',
+      invoiceAmountMinor: 100n,
+      invoiceReleasedMinor: 50n,
+      bookedMinor: 150n,
+      releasedMinor: 50n,
+      allocationBase: { invoiceReleasedMinor: 50n, releasedMinor: 50n },
+    });
+
+    const small = planRelease(rebooked, Money.of(1n, EUR));
+    const half = planRelease(rebooked, Money.of(25n, EUR));
+    const rest = planRelease(rebooked, null);
+
+    expect(small.freedMinor).toBe(2n);
+    expect(half.freedMinor).toBe(50n);
+    expect(rest.freedMinor).toBe(100n);
   });
 
   it('closes a partially repaid invoice with zero exposure on its final repayment', () => {

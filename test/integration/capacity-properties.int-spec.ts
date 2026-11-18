@@ -36,6 +36,8 @@ interface ModelReservation {
   booked: bigint;
   released: bigint;
   invoiceReleased: bigint;
+  baseInvoiceReleased: bigint;
+  baseReleased: bigint;
   releases: Map<string, bigint | null>;
 }
 
@@ -87,6 +89,8 @@ function expectReserve(
     booked,
     released: 0n,
     invoiceReleased: 0n,
+    baseInvoiceReleased: 0n,
+    baseReleased: 0n,
     releases: new Map(),
   });
   model.utilised += booked;
@@ -130,7 +134,11 @@ function cumulativeFreed(reservation: ModelReservation, cumulativeInvoice: bigin
   if (cumulativeInvoice === reservation.invoiceAmount) {
     return reservation.booked;
   }
-  const share = (reservation.booked * cumulativeInvoice) / reservation.invoiceAmount;
+  const share =
+    reservation.baseReleased +
+    ((reservation.booked - reservation.baseReleased) *
+      (cumulativeInvoice - reservation.baseInvoiceReleased)) /
+      (reservation.invoiceAmount - reservation.baseInvoiceReleased);
   if (share < reservation.released) {
     return reservation.released;
   }
@@ -158,6 +166,8 @@ async function resyncFromDatabase(db: Db, programId: string, model: Model): Prom
       booked: row.booked_minor,
       released: row.released_minor,
       invoiceReleased: row.invoice_released_minor,
+      baseInvoiceReleased: row.allocation_base_invoice_minor,
+      baseReleased: row.allocation_base_released_minor,
       releases: known?.releases ?? new Map(),
     });
   }

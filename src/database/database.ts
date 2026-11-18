@@ -27,6 +27,8 @@ export function createDatabase(options: DatabaseOptions): Db {
     connectionString: options.connectionString,
     max: options.maxConnections,
     connectionTimeoutMillis: 5_000,
+    lock_timeout: 10_000,
+    statement_timeout: 60_000,
     application_name: options.applicationName ?? 'programme-capacity-service',
     types: typeOverrides(),
   });

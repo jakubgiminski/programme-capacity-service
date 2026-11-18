@@ -18,6 +18,12 @@ import { parseTreasuryMessage } from './treasury-messages';
 
 const INITIAL_BACKOFF_MS = 200;
 const OUTBOX_FLUSH_INTERVAL_MS = 30_000;
+const HEARTBEAT_INTERVAL_MS = 3_000;
+
+interface Heartbeat {
+  assertAlive(): void;
+  stop(): void;
+}
 
 @Injectable()
 export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -125,43 +131,69 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
   private async handle(payload: EachMessagePayload): Promise<void> {
     const { topic, partition, message } = payload;
     const source: MessageSource = { topic, partition, offset: message.offset };
-    let delay = INITIAL_BACKOFF_MS;
-    for (;;) {
-      try {
-        await this.process(message, source);
-        break;
-      } catch (error) {
-        this.logger.error(
-          { err: error, topic, partition, offset: message.offset },
-          'Failed to process treasury message, retrying without committing',
-        );
-        const proceed = await this.pause(delay);
-        if (!proceed) {
-          throw error;
-        }
-        await payload.heartbeat();
-        delay = Math.min(delay * 2, this.config.KAFKA_RETRY_MAX_BACKOFF_MS);
-      }
+    const heartbeat = this.keepAlive(payload);
+    try {
+      await this.processWithRetry(message, source);
+      heartbeat.assertAlive();
+    } finally {
+      heartbeat.stop();
     }
     await this.consumer.commitOffsets([
       { topic, partition, offset: (BigInt(message.offset) + 1n).toString() },
     ]);
   }
 
+  private keepAlive(payload: EachMessagePayload): Heartbeat {
+    let failure: Error | null = null;
+    const timer = setInterval(() => {
+      payload.heartbeat().catch((error: unknown) => {
+        failure ??= error instanceof Error ? error : new Error(String(error));
+      });
+    }, HEARTBEAT_INTERVAL_MS);
+    return {
+      assertAlive: () => {
+        if (failure !== null) {
+          throw failure;
+        }
+      },
+      stop: () => {
+        clearInterval(timer);
+      },
+    };
+  }
+
+  private async processWithRetry(message: KafkaMessage, source: MessageSource): Promise<void> {
+    let delay = INITIAL_BACKOFF_MS;
+    for (;;) {
+      try {
+        await this.process(message, source);
+        return;
+      } catch (error) {
+        this.logger.error(
+          { err: error, ...source },
+          'Failed to process treasury message, retrying without committing',
+        );
+        const proceed = await this.pause(delay);
+        if (!proceed) {
+          throw error;
+        }
+        delay = Math.min(delay * 2, this.config.KAFKA_RETRY_MAX_BACKOFF_MS);
+      }
+    }
+  }
+
   private async process(message: KafkaMessage, source: MessageSource): Promise<void> {
-    const rawValue = message.value?.toString('utf8') ?? '';
+    const value = message.value ?? Buffer.alloc(0);
+    const rawValue = value.toString('utf8');
     const parsed = parseTreasuryMessage(rawValue);
     if (parsed.kind === 'unreadable') {
-      await this.deadLetters.publishDirect({
-        key: message.key,
-        rawValue,
-        reason: parsed.reason,
-        source,
-      });
-      this.logger.warn(
-        { ...source, reason: parsed.reason },
-        'Unreadable treasury message sent to DLQ',
-      );
+      await this.deadLetterUnreadable(message, value, source, parsed.reason);
+      return;
+    }
+    const key = message.key?.toString('utf8') ?? null;
+    if (key !== parsed.envelope.programId) {
+      const reason = `Message key ${JSON.stringify(key)} does not match programId ${parsed.envelope.programId}`;
+      await this.deadLetterUnreadable(message, value, source, reason);
       return;
     }
     const result = await this.applyMessage.execute({ parsed, rawValue, source });
@@ -181,6 +213,22 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
     if (result.deadLettered > 0) {
       await this.flushOutbox();
     }
+  }
+
+  private async deadLetterUnreadable(
+    message: KafkaMessage,
+    value: Buffer,
+    source: MessageSource,
+    reason: string,
+  ): Promise<void> {
+    const recorded = await this.deadLetters.recordUnreadable({
+      key: message.key,
+      value,
+      reason,
+      source,
+    });
+    this.logger.warn({ ...source, reason, recorded }, 'Unreadable treasury message dead-lettered');
+    await this.flushOutbox();
   }
 
   private async flushOutbox(): Promise<void> {

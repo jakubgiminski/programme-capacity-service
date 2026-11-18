@@ -9,7 +9,6 @@ export interface Program {
   readonly limitMinor: bigint;
   readonly utilisedMinor: bigint;
   readonly version: bigint;
-  readonly treasuryRevision: bigint;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -20,6 +19,13 @@ export interface FxSnapshot {
   readonly source: string;
   readonly asOf: Date;
 }
+
+export interface AllocationBase {
+  readonly invoiceReleasedMinor: bigint;
+  readonly releasedMinor: bigint;
+}
+
+export const ZERO_ALLOCATION_BASE: AllocationBase = { invoiceReleasedMinor: 0n, releasedMinor: 0n };
 
 export interface Reservation {
   readonly id: string;
@@ -32,6 +38,7 @@ export interface Reservation {
   readonly invoiceReleasedMinor: bigint;
   readonly bookedMinor: bigint;
   readonly releasedMinor: bigint;
+  readonly allocationBase: AllocationBase;
   readonly fx: FxSnapshot | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;

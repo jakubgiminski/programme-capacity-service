@@ -1,31 +1,43 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { type IHeaders, type Kafka, Partitioners, type Producer } from 'kafkajs';
-import { type MessageSource } from '../capacity/infrastructure/treasury.repository';
+import {
+  type MessageSource,
+  TreasuryRepository,
+} from '../capacity/infrastructure/treasury.repository';
 import { type AppConfig } from '../config/config';
 import { APP_CONFIG } from '../config/config.module';
 import { DATABASE, type Db } from '../database/database';
+import { type TreasuryDeadLettersTable } from '../database/database.types';
 import { KAFKA } from './kafka-client';
 
 const OUTBOX_BATCH = 100;
 
-export interface DirectDeadLetter {
+type DeadLetterRow = Omit<TreasuryDeadLettersTable, 'id' | 'attempts' | 'created_at'> & {
+  id: bigint;
+};
+
+export interface UnreadableMessage {
   readonly key: Buffer | null;
-  readonly rawValue: string;
+  readonly value: Buffer;
   readonly reason: string;
   readonly source: MessageSource;
 }
 
-function headers(reason: string, source: MessageSource, messageId: string | null): IHeaders {
+function headers(row: DeadLetterRow): IHeaders {
   const result: IHeaders = {
-    'x-dlq-reason': reason.slice(0, 1_000),
-    'x-original-topic': source.topic,
-    'x-original-partition': String(source.partition),
-    'x-original-offset': source.offset,
+    'x-dlq-reason': row.reason.slice(0, 1_000),
+    'x-original-topic': row.source_topic,
+    'x-original-partition': String(row.source_partition),
+    'x-original-offset': row.source_offset,
   };
-  if (messageId !== null) {
-    result['x-message-id'] = messageId;
+  if (row.message_id !== null) {
+    result['x-message-id'] = row.message_id;
   }
   return result;
+}
+
+function describeError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 1_000);
 }
 
 @Injectable()
@@ -38,6 +50,7 @@ export class DeadLetterPublisher {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(KAFKA) kafka: Kafka,
     @Inject(DATABASE) private readonly db: Db,
+    @Inject(TreasuryRepository) private readonly treasury: TreasuryRepository,
   ) {
     this.producer = kafka.producer({ createPartitioner: Partitioners.DefaultPartitioner });
   }
@@ -50,17 +63,15 @@ export class DeadLetterPublisher {
     await this.producer.disconnect();
   }
 
-  async publishDirect(deadLetter: DirectDeadLetter): Promise<void> {
-    await this.producer.send({
-      topic: this.config.KAFKA_DLQ_TOPIC,
-      acks: -1,
-      messages: [
-        {
-          key: deadLetter.key,
-          value: deadLetter.rawValue,
-          headers: headers(deadLetter.reason, deadLetter.source, null),
-        },
-      ],
+  async recordUnreadable(message: UnreadableMessage): Promise<boolean> {
+    return this.treasury.addDeadLetter(this.db, {
+      messageId: null,
+      programId: null,
+      revision: null,
+      reason: message.reason,
+      key: message.key,
+      payload: message.value,
+      source: message.source,
     });
   }
 
@@ -78,8 +89,8 @@ export class DeadLetterPublisher {
     let published = 0;
     for (;;) {
       const batch = await this.publishBatch();
-      published += batch;
-      if (batch < OUTBOX_BATCH) {
+      published += batch.published;
+      if (batch.selected < OUTBOX_BATCH || batch.published === 0) {
         if (published > 0) {
           this.logger.log(`Published ${published} dead letters`);
         }
@@ -88,43 +99,62 @@ export class DeadLetterPublisher {
     }
   }
 
-  private publishBatch(): Promise<number> {
+  private publishBatch(): Promise<{ selected: number; published: number }> {
     return this.db.transaction().execute(async (trx) => {
       const rows = await trx
         .selectFrom('treasury_dead_letters')
-        .selectAll()
+        .select([
+          'id',
+          'message_id',
+          'program_id',
+          'revision',
+          'reason',
+          'message_key',
+          'payload',
+          'source_topic',
+          'source_partition',
+          'source_offset',
+          'last_error',
+          'published_at',
+        ])
         .where('published_at', 'is', null)
+        .orderBy('attempts')
         .orderBy('id')
         .limit(OUTBOX_BATCH)
         .forUpdate()
         .skipLocked()
         .execute();
-      if (rows.length === 0) {
-        return 0;
+      let published = 0;
+      for (const row of rows) {
+        try {
+          await this.publish(row);
+          await trx
+            .updateTable('treasury_dead_letters')
+            .set({ published_at: new Date(), last_error: null })
+            .where('id', '=', row.id)
+            .execute();
+          published += 1;
+        } catch (error) {
+          this.logger.error(
+            { err: error, deadLetterId: String(row.id) },
+            'Failed to publish dead letter; will retry',
+          );
+          await trx
+            .updateTable('treasury_dead_letters')
+            .set((eb) => ({ attempts: eb('attempts', '+', 1), last_error: describeError(error) }))
+            .where('id', '=', row.id)
+            .execute();
+        }
       }
-      await this.producer.send({
-        topic: this.config.KAFKA_DLQ_TOPIC,
-        acks: -1,
-        messages: rows.map((row) => ({
-          key: row.program_id,
-          value: row.raw_value,
-          headers: headers(
-            row.reason,
-            { topic: row.source_topic, partition: row.source_partition, offset: row.source_offset },
-            row.message_id,
-          ),
-        })),
-      });
-      await trx
-        .updateTable('treasury_dead_letters')
-        .set({ published_at: new Date() })
-        .where(
-          'id',
-          'in',
-          rows.map((row) => row.id),
-        )
-        .execute();
-      return rows.length;
+      return { selected: rows.length, published };
+    });
+  }
+
+  private async publish(row: DeadLetterRow): Promise<void> {
+    await this.producer.send({
+      topic: this.config.KAFKA_DLQ_TOPIC,
+      acks: -1,
+      messages: [{ key: row.message_key, value: row.payload, headers: headers(row) }],
     });
   }
 }

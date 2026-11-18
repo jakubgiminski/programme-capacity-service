@@ -26,6 +26,7 @@ export interface PendingMessage {
   readonly programId: string;
   readonly revision: bigint;
   readonly rawValue: string;
+  readonly rejected: boolean;
   readonly source: MessageSource;
 }
 
@@ -34,7 +35,8 @@ export interface DeadLetter {
   readonly programId: string | null;
   readonly revision: bigint | null;
   readonly reason: string;
-  readonly rawValue: string;
+  readonly key: Buffer | null;
+  readonly payload: Buffer;
   readonly source: MessageSource;
 }
 
@@ -58,10 +60,33 @@ export interface SnapshotReference {
   readonly revision: bigint;
 }
 
+export function storableText(text: string): string {
+  return text.replaceAll('\u0000', '\uFFFD');
+}
+
 @Injectable()
 export class TreasuryRepository {
-  async lockProgramStream(db: Executor, programId: string): Promise<void> {
-    await sql`SELECT pg_advisory_xact_lock(hashtextextended(${programId}, 0))`.execute(db);
+  async lockStream(db: Executor, programId: string): Promise<bigint> {
+    await db
+      .insertInto('treasury_streams')
+      .values({ program_id: programId })
+      .onConflict((conflict) => conflict.column('program_id').doNothing())
+      .execute();
+    const row = await db
+      .selectFrom('treasury_streams')
+      .select('revision')
+      .where('program_id', '=', programId)
+      .forUpdate()
+      .executeTakeFirstOrThrow();
+    return row.revision;
+  }
+
+  async setStreamRevision(db: Executor, programId: string, revision: bigint): Promise<void> {
+    await db
+      .updateTable('treasury_streams')
+      .set({ revision, updated_at: new Date() })
+      .where('program_id', '=', programId)
+      .execute();
   }
 
   async isProcessed(db: Executor, messageId: string): Promise<boolean> {
@@ -82,7 +107,7 @@ export class TreasuryRepository {
         revision: message.revision,
         type: message.type,
         outcome: message.outcome,
-        reason: message.reason,
+        reason: message.reason === null ? null : storableText(message.reason),
         source_topic: message.source.topic,
         source_partition: message.source.partition,
         source_offset: message.source.offset,
@@ -98,7 +123,11 @@ export class TreasuryRepository {
   ): Promise<void> {
     await db
       .updateTable('processed_messages')
-      .set({ outcome, reason, updated_at: new Date() })
+      .set({
+        outcome,
+        reason: reason === null ? null : storableText(reason),
+        updated_at: new Date(),
+      })
       .where('message_id', '=', messageId)
       .execute();
   }
@@ -111,6 +140,7 @@ export class TreasuryRepository {
         program_id: message.programId,
         revision: message.revision,
         raw_value: message.rawValue,
+        rejected: message.rejected,
         source_topic: message.source.topic,
         source_partition: message.source.partition,
         source_offset: message.source.offset,
@@ -139,6 +169,7 @@ export class TreasuryRepository {
       programId: row.program_id,
       revision: row.revision,
       rawValue: row.raw_value,
+      rejected: row.rejected,
       source: {
         topic: row.source_topic,
         partition: row.source_partition,
@@ -152,9 +183,10 @@ export class TreasuryRepository {
       .deleteFrom('pending_treasury_messages')
       .where('program_id', '=', programId)
       .where('revision', '<=', upToRevision)
-      .returning('message_id')
+      .returning(['message_id', 'rejected'])
       .execute();
-    if (removed.length === 0) {
+    const superseded = removed.filter((row) => !row.rejected);
+    if (superseded.length === 0) {
       return 0;
     }
     await db
@@ -164,37 +196,30 @@ export class TreasuryRepository {
         reason: `Covered by snapshot revision ${upToRevision}`,
         updated_at: new Date(),
       })
-      .where(
-        'message_id',
-        'in',
-        removed.map((row) => row.message_id),
-      )
+      .where(sql<boolean>`message_id = any(${superseded.map((row) => row.message_id)}::text[])`)
       .execute();
-    return removed.length;
+    return superseded.length;
   }
 
-  async addDeadLetter(db: Executor, deadLetter: DeadLetter): Promise<void> {
-    await db
+  async addDeadLetter(db: Executor, deadLetter: DeadLetter): Promise<boolean> {
+    const result = await db
       .insertInto('treasury_dead_letters')
       .values({
         message_id: deadLetter.messageId,
         program_id: deadLetter.programId,
         revision: deadLetter.revision,
-        reason: deadLetter.reason,
-        raw_value: deadLetter.rawValue,
+        reason: storableText(deadLetter.reason),
+        message_key: deadLetter.key,
+        payload: deadLetter.payload,
         source_topic: deadLetter.source.topic,
         source_partition: deadLetter.source.partition,
         source_offset: deadLetter.source.offset,
       })
-      .execute();
-  }
-
-  async setTreasuryRevision(db: Executor, programId: string, revision: bigint): Promise<void> {
-    await db
-      .updateTable('programs')
-      .set({ treasury_revision: revision })
-      .where('id', '=', programId)
-      .execute();
+      .onConflict((conflict) =>
+        conflict.columns(['source_topic', 'source_partition', 'source_offset']).doNothing(),
+      )
+      .executeTakeFirst();
+    return result.numInsertedOrUpdatedRows === 1n;
   }
 
   async recordDiscrepancies(

@@ -13,36 +13,41 @@ export const TreasuryMessageType = {
   ProgramSnapshot: 'ProgramSnapshot',
 } as const;
 
-const envelopeSchema = z.object({
+const envelopeShape = {
   messageId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
   programId: identifierSchema,
   revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  type: z.string().min(1).max(64),
+  type: z.string().regex(/^[A-Za-z][A-Za-z0-9]{0,63}$/),
   occurredAt: z.iso.datetime({ offset: true }),
-});
+};
 
-const programLimitSetSchema = envelopeSchema.extend({
+const envelopeSchema = z.object(envelopeShape);
+
+const programLimitSetSchema = z.strictObject({
+  ...envelopeShape,
   type: z.literal(TreasuryMessageType.ProgramLimitSet),
   currency: currencySchema,
   limit: nonNegativeMinorUnitsSchema,
 });
 
-const invoiceRepaidSchema = envelopeSchema.extend({
+const invoiceRepaidSchema = z.strictObject({
+  ...envelopeShape,
   type: z.literal(TreasuryMessageType.InvoiceRepaid),
   invoiceId: identifierSchema,
   releaseId: identifierSchema,
   amount: moneySchema.optional(),
 });
 
-const snapshotReservationSchema = z.object({
+const snapshotReservationSchema = z.strictObject({
   invoiceId: identifierSchema,
   invoiceAmount: positiveMinorUnitsSchema,
   invoiceCurrency: currencySchema,
   bookedAmount: positiveMinorUnitsSchema,
 });
 
-const programSnapshotSchema = envelopeSchema
-  .extend({
+const programSnapshotSchema = z
+  .strictObject({
+    ...envelopeShape,
     type: z.literal(TreasuryMessageType.ProgramSnapshot),
     currency: currencySchema,
     limit: nonNegativeMinorUnitsSchema,
@@ -88,7 +93,9 @@ function describe(error: z.ZodError): string {
   return error.issues
     .slice(0, 10)
     .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
-    .join('; ');
+    .join('; ')
+    .replaceAll('\u0000', '\uFFFD')
+    .slice(0, 2_000);
 }
 
 function parseJson(raw: string): { ok: true; value: unknown } | { ok: false } {

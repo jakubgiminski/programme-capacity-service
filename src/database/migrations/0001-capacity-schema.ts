@@ -8,7 +8,6 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       limit_minor bigint NOT NULL CHECK (limit_minor >= 0),
       utilised_minor bigint NOT NULL DEFAULT 0 CHECK (utilised_minor >= 0),
       version bigint NOT NULL DEFAULT 0 CHECK (version >= 0),
-      treasury_revision bigint NOT NULL DEFAULT 0 CHECK (treasury_revision >= 0),
       created_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now()
     )
@@ -45,6 +44,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       booked_minor bigint NOT NULL CHECK (booked_minor > 0),
       released_minor bigint NOT NULL DEFAULT 0
         CHECK (released_minor >= 0 AND released_minor <= booked_minor),
+      allocation_base_invoice_minor bigint NOT NULL DEFAULT 0
+        CHECK (allocation_base_invoice_minor >= 0 AND allocation_base_invoice_minor <= invoice_released_minor),
+      allocation_base_released_minor bigint NOT NULL DEFAULT 0
+        CHECK (allocation_base_released_minor >= 0 AND allocation_base_released_minor <= released_minor),
       fx_rate bigint CHECK (fx_rate > 0),
       fx_scale smallint CHECK (fx_scale >= 0),
       fx_source text,

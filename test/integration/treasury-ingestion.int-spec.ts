@@ -37,6 +37,15 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
       .execute();
   }
 
+  async function streamRevision(programId: string): Promise<bigint> {
+    const row = await database.db
+      .selectFrom('treasury_streams')
+      .select('revision')
+      .where('program_id', '=', programId)
+      .executeTakeFirstOrThrow();
+    return row.revision;
+  }
+
   async function deadLetters(programId: string) {
     return database.db
       .selectFrom('treasury_dead_letters')
@@ -64,11 +73,8 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
     expect(created.outcome).toBe('APPLIED');
     expect(changed.outcome).toBe('APPLIED');
     const capacity = await services.queries.getCapacity(id);
-    expect(capacity.program).toMatchObject({
-      currency: USD,
-      limitMinor: 750_000n,
-      treasuryRevision: 2n,
-    });
+    expect(capacity.program).toMatchObject({ currency: USD, limitMinor: 750_000n });
+    expect(await streamRevision(id)).toBe(2n);
     const ledger = await database.db
       .selectFrom('ledger_entries')
       .select(['type', 'delta_minor', 'reason', 'source_message_id', 'actor'])
@@ -122,7 +128,7 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
     expect(closing).toMatchObject({ outcome: 'APPLIED', drained: 2 });
     const program = (await services.queries.getCapacity(id)).program;
     expect(program.limitMinor).toBe(4_000n);
-    expect(program.treasuryRevision).toBe(4n);
+    expect(await streamRevision(id)).toBe(4n);
     expect(await outcomes(id)).toEqual([
       { message_id: `${id}-1`, outcome: 'APPLIED' },
       { message_id: `${id}-2`, outcome: 'APPLIED' },
@@ -160,7 +166,7 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
     expect(late.outcome).toBe('STALE');
     const program = (await services.queries.getCapacity(id)).program;
     expect(program.limitMinor).toBe(6_000n);
-    expect(program.treasuryRevision).toBe(6n);
+    expect(await streamRevision(id)).toBe(6n);
     expect(await outcomes(id)).toEqual([
       { message_id: `${id}-1`, outcome: 'APPLIED' },
       { message_id: `${id}-3`, outcome: 'SUPERSEDED' },
@@ -230,7 +236,8 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
     expect(unknownInvoice.reason).toMatch(/reservation-not-found/);
     expect(currencyChange).toMatchObject({ outcome: 'REJECTED', drained: 1 });
     const program = (await services.queries.getCapacity(id)).program;
-    expect(program).toMatchObject({ currency: USD, limitMinor: 400_000n, treasuryRevision: 4n });
+    expect(program).toMatchObject({ currency: USD, limitMinor: 400_000n });
+    expect(await streamRevision(id)).toBe(4n);
     expect((await deadLetters(id)).map((row) => row.message_id)).toEqual([`${id}-2`, `${id}-3`]);
   });
 
@@ -238,15 +245,41 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
     const id = nextProgramId();
 
     const unknownProgram = await apply(invoiceRepaid(`${id}-1`, id, 1, 'INV-1', 'TR-1'));
-    await apply(limitSet(`${id}-1b`, id, 1, '1000'));
-    const invalid = await apply({ ...limitSet(`${id}-2`, id, 2, '1000'), limit: '-5' });
-    const next = await apply(limitSet(`${id}-3`, id, 3, '3000'));
+    const created = await apply(limitSet(`${id}-2`, id, 2, '1000'));
+    const invalid = await apply({ ...limitSet(`${id}-3`, id, 3, '1000'), limit: '-5' });
+    const next = await apply(limitSet(`${id}-4`, id, 4, '4000'));
 
     expect(unknownProgram.outcome).toBe('REJECTED');
+    expect(created.outcome).toBe('APPLIED');
     expect(invalid.outcome).toBe('REJECTED');
     expect(invalid.reason).toMatch(/Invalid ProgramLimitSet/);
     expect(next.outcome).toBe('APPLIED');
-    expect((await services.queries.getCapacity(id)).program.limitMinor).toBe(3_000n);
+    expect((await services.queries.getCapacity(id)).program.limitMinor).toBe(4_000n);
+    expect(await streamRevision(id)).toBe(4n);
+  });
+
+  it('consumes a snapshot rejected ahead of a gap once the gap closes', async () => {
+    const id = nextProgramId();
+    await apply(limitSet(`${id}-1`, id, 1, '1000'));
+
+    const currencyChange = await apply(snapshot(`${id}-4`, id, 4, '4000', [], 'EUR'));
+    const parked = await apply(limitSet(`${id}-5`, id, 5, '5000'));
+    await apply(limitSet(`${id}-2`, id, 2, '2000'));
+    const closing = await apply(limitSet(`${id}-3`, id, 3, '3000'));
+
+    expect(currencyChange).toMatchObject({ outcome: 'REJECTED', deadLettered: 1 });
+    expect(parked.outcome).toBe('PARKED');
+    expect(closing).toMatchObject({ outcome: 'APPLIED', drained: 2, deadLettered: 0 });
+    expect((await services.queries.getCapacity(id)).program.limitMinor).toBe(5_000n);
+    expect(await streamRevision(id)).toBe(5n);
+    expect((await deadLetters(id)).map((row) => row.message_id)).toEqual([`${id}-4`]);
+    expect(await outcomes(id)).toEqual([
+      { message_id: `${id}-1`, outcome: 'APPLIED' },
+      { message_id: `${id}-2`, outcome: 'APPLIED' },
+      { message_id: `${id}-3`, outcome: 'APPLIED' },
+      { message_id: `${id}-4`, outcome: 'REJECTED' },
+      { message_id: `${id}-5`, outcome: 'APPLIED' },
+    ]);
   });
 
   it('rejects a second message parked for the same revision', async () => {
@@ -375,12 +408,6 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
       },
       {
         type: 'RECONCILE_ADJUST',
-        delta_minor: 500n,
-        reason: 'TREASURY_AMOUNT_HIGHER',
-        source_message_id: `${id}-2`,
-      },
-      {
-        type: 'RECONCILE_ADJUST',
         delta_minor: -600n,
         reason: 'MISSING_FROM_SNAPSHOT',
         source_message_id: `${id}-2`,
@@ -389,6 +416,12 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
         type: 'RECONCILE_ADJUST',
         delta_minor: -500n,
         reason: 'TREASURY_AMOUNT_LOWER',
+        source_message_id: `${id}-2`,
+      },
+      {
+        type: 'RECONCILE_ADJUST',
+        delta_minor: 500n,
+        reason: 'TREASURY_AMOUNT_HIGHER',
         source_message_id: `${id}-2`,
       },
       {
@@ -450,6 +483,72 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
     await expectInvariants(database.db, id);
   });
 
+  it('allocates repayments after a rebook against the remaining invoice and exposure', async () => {
+    const id = nextProgramId();
+    const entry = { invoiceId: 'TRE-1', invoiceAmount: '100', invoiceCurrency: 'USD' };
+    await apply(snapshot(`${id}-1`, id, 1, '100000', [{ ...entry, bookedAmount: '100' }]));
+    await apply(
+      invoiceRepaid(`${id}-2`, id, 2, 'TRE-1', 'TR-1', { amount: '50', currency: 'USD' }),
+    );
+    await apply(snapshot(`${id}-3`, id, 3, '100000', [{ ...entry, bookedAmount: '100' }]));
+
+    await apply(invoiceRepaid(`${id}-4`, id, 4, 'TRE-1', 'TR-2', { amount: '1', currency: 'USD' }));
+    await apply(invoiceRepaid(`${id}-5`, id, 5, 'TRE-1', 'TR-3'));
+
+    const details = await services.queries.getReservation(id, 'TRE-1');
+    expect(details.releases.map((release) => release.freedMinor)).toEqual([50n, 2n, 98n]);
+    expect(details.reservation).toMatchObject({
+      status: 'RELEASED',
+      bookedMinor: 150n,
+      releasedMinor: 150n,
+    });
+    await expectInvariants(database.db, id);
+  });
+
+  it('imports a snapshot whose ledger insert exceeds the bind-parameter limit', async () => {
+    const id = nextProgramId();
+    const entries = Array.from({ length: 7_000 }, (_, index) => ({
+      invoiceId: `BULK-${index}`,
+      invoiceAmount: '10',
+      invoiceCurrency: 'USD',
+      bookedAmount: '10',
+    }));
+
+    const result = await apply(snapshot(`${id}-1`, id, 1, '1000000', entries));
+    const replaced = await apply(snapshot(`${id}-2`, id, 2, '1000000', entries.slice(1)));
+
+    expect(result.outcome).toBe('APPLIED');
+    expect(replaced.outcome).toBe('APPLIED');
+    expect((await services.queries.getCapacity(id)).program.utilisedMinor).toBe(69_990n);
+    await expectInvariants(database.db, id);
+  });
+
+  it('applies a net-zero swap at the BIGINT boundary without overflowing the ledger', async () => {
+    const id = nextProgramId();
+    const max = '9223372036854775807';
+    await apply(
+      snapshot(`${id}-1`, id, 1, max, [
+        { invoiceId: 'Z', invoiceAmount: max, invoiceCurrency: 'USD', bookedAmount: max },
+      ]),
+    );
+
+    const swap = await apply(
+      snapshot(`${id}-2`, id, 2, max, [
+        { invoiceId: 'A', invoiceAmount: '1', invoiceCurrency: 'USD', bookedAmount: '1' },
+        {
+          invoiceId: 'Z',
+          invoiceAmount: max,
+          invoiceCurrency: 'USD',
+          bookedAmount: '9223372036854775806',
+        },
+      ]),
+    );
+
+    expect(swap.outcome).toBe('APPLIED');
+    expect((await services.queries.getCapacity(id)).program.utilisedMinor).toBe(BigInt(max));
+    await expectInvariants(database.db, id);
+  });
+
   it('creates a programme from a snapshot and imports its reservations', async () => {
     const id = nextProgramId();
 
@@ -472,7 +571,7 @@ describe('ApplyTreasuryMessage (Postgres)', () => {
     const result = await apply(snapshot(`${id}-2`, id, 2, '1000', [], 'EUR'));
 
     expect(result.outcome).toBe('REJECTED');
-    expect((await services.queries.getCapacity(id)).program.treasuryRevision).toBe(2n);
+    expect(await streamRevision(id)).toBe(2n);
   });
 
   it('stays consistent when an API release races a snapshot', async () => {

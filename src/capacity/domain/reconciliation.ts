@@ -1,6 +1,12 @@
 import { type CurrencyCode, INT64_MAX } from '../../money';
 import { AmountOutOfRangeCapacityError } from './errors';
-import { outstandingMinor, type Program, type Reservation, type ReservationStatus } from './model';
+import {
+  type AllocationBase,
+  outstandingMinor,
+  type Program,
+  type Reservation,
+  type ReservationStatus,
+} from './model';
 
 export type DiscrepancyKind =
   'TREASURY_AMOUNT_LOWER' | 'MISSING_FROM_SNAPSHOT' | 'RELEASED_LOCALLY' | 'INVOICE_MISMATCH';
@@ -36,6 +42,7 @@ export interface ReservationAdjustment {
   readonly bookedAfterMinor: bigint;
   readonly releasedAfterMinor: bigint;
   readonly invoiceReleasedAfterMinor: bigint;
+  readonly allocationBase: AllocationBase;
   readonly status: ReservationStatus;
   readonly deltaMinor: bigint;
   readonly reason: Exclude<AdjustmentReason, 'IMPORTED_FROM_SNAPSHOT'>;
@@ -100,7 +107,7 @@ export function planReconciliation(
   return {
     limitMinor: snapshot.limitMinor,
     utilisedAfterMinor,
-    changes: [...changes].sort(byInvoiceId),
+    changes: [...changes].sort(decreasesFirst),
     discrepancies: [...discrepancies].sort((a, b) => compareText(a.invoiceId, b.invoiceId)),
   };
 }
@@ -170,6 +177,7 @@ function reconcileMissing(
       bookedAfterMinor: reservation.bookedMinor,
       releasedAfterMinor: reservation.bookedMinor,
       invoiceReleasedAfterMinor: reservation.invoiceAmountMinor,
+      allocationBase: reservation.allocationBase,
       status: 'RELEASED',
       deltaMinor: -outstandingMinor(reservation),
       reason: 'MISSING_FROM_SNAPSHOT',
@@ -201,6 +209,10 @@ function rebook(
     bookedAfterMinor,
     releasedAfterMinor: reservation.releasedMinor,
     invoiceReleasedAfterMinor: reservation.invoiceReleasedMinor,
+    allocationBase: {
+      invoiceReleasedMinor: reservation.invoiceReleasedMinor,
+      releasedMinor: reservation.releasedMinor,
+    },
     status: reservation.status,
     deltaMinor: treasuryOutstandingMinor - outstandingMinor(reservation),
     reason,
@@ -227,7 +239,11 @@ function invoiceIdOf(change: ReconciliationChange): string {
   return change.kind === 'import' ? change.entry.invoiceId : change.reservation.invoiceId;
 }
 
-function byInvoiceId(a: ReconciliationChange, b: ReconciliationChange): number {
+function decreasesFirst(a: ReconciliationChange, b: ReconciliationChange): number {
+  const direction = Number(a.deltaMinor >= 0n) - Number(b.deltaMinor >= 0n);
+  if (direction !== 0) {
+    return direction;
+  }
   return compareText(invoiceIdOf(a), invoiceIdOf(b));
 }
 

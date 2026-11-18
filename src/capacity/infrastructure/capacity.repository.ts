@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { type Kysely } from 'kysely';
+import { type Kysely, sql } from 'kysely';
 import { type Database, type NewLedgerEntry } from '../../database/database.types';
 import { type CurrencyCode, parseCurrency } from '../../money';
 import {
+  type AllocationBase,
   type FxSnapshot,
   type Origin,
   type Program,
@@ -17,7 +18,6 @@ export interface NewProgram {
   id: string;
   currency: CurrencyCode;
   limitMinor: bigint;
-  treasuryRevision?: bigint;
 }
 
 export interface NewReservation {
@@ -35,6 +35,7 @@ export interface ReservationBalances {
   invoiceReleasedMinor: bigint;
   bookedMinor: bigint;
   releasedMinor: bigint;
+  allocationBase?: AllocationBase;
 }
 
 export interface NewRelease {
@@ -56,7 +57,6 @@ export interface NewRelease {
 export interface ProgramBalances {
   limitMinor: bigint;
   utilisedMinor: bigint;
-  treasuryRevision?: bigint;
 }
 
 const programColumns = [
@@ -65,7 +65,6 @@ const programColumns = [
   'limit_minor',
   'utilised_minor',
   'version',
-  'treasury_revision',
   'created_at',
   'updated_at',
 ] as const;
@@ -76,7 +75,6 @@ interface ProgramRecord {
   limit_minor: bigint;
   utilised_minor: bigint;
   version: bigint;
-  treasury_revision: bigint;
   created_at: Date;
   updated_at: Date;
 }
@@ -92,6 +90,8 @@ interface ReservationRecord {
   invoice_released_minor: bigint;
   booked_minor: bigint;
   released_minor: bigint;
+  allocation_base_invoice_minor: bigint;
+  allocation_base_released_minor: bigint;
   fx_rate: bigint | null;
   fx_scale: number | null;
   fx_source: string | null;
@@ -124,7 +124,6 @@ function toProgram(row: ProgramRecord): Program {
     limitMinor: row.limit_minor,
     utilisedMinor: row.utilised_minor,
     version: row.version,
-    treasuryRevision: row.treasury_revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -159,6 +158,10 @@ function toReservation(row: ReservationRecord): Reservation {
     invoiceReleasedMinor: row.invoice_released_minor,
     bookedMinor: row.booked_minor,
     releasedMinor: row.released_minor,
+    allocationBase: {
+      invoiceReleasedMinor: row.allocation_base_invoice_minor,
+      releasedMinor: row.allocation_base_released_minor,
+    },
     fx: toFxSnapshot(row),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -181,6 +184,32 @@ function toRelease(row: ReleaseRecord): Release {
     bookedAfterMinor: row.booked_after_minor,
     releasedAfterMinor: row.released_after_minor,
     createdAt: row.created_at,
+  };
+}
+
+const INSERT_CHUNK = 1_000;
+
+function chunks<T>(items: readonly T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let start = 0; start < items.length; start += size) {
+    result.push(items.slice(start, start + size));
+  }
+  return result;
+}
+
+function reservationValues(reservation: NewReservation) {
+  return {
+    program_id: reservation.programId,
+    invoice_id: reservation.invoiceId,
+    status: 'ACTIVE' as const,
+    origin: reservation.origin,
+    invoice_amount_minor: reservation.invoiceAmountMinor,
+    invoice_currency: reservation.invoiceCurrency,
+    booked_minor: reservation.bookedMinor,
+    fx_rate: reservation.fx?.rateScaled ?? null,
+    fx_scale: reservation.fx?.scale ?? null,
+    fx_source: reservation.fx?.source ?? null,
+    fx_as_of: reservation.fx?.asOf ?? null,
   };
 }
 
@@ -212,7 +241,6 @@ export class CapacityRepository {
         id: program.id,
         currency: program.currency,
         limit_minor: program.limitMinor,
-        treasury_revision: program.treasuryRevision ?? 0n,
       })
       .returning(programColumns)
       .executeTakeFirstOrThrow();
@@ -225,7 +253,6 @@ export class CapacityRepository {
       .set({
         limit_minor: next.limitMinor,
         utilised_minor: next.utilisedMinor,
-        treasury_revision: next.treasuryRevision ?? program.treasuryRevision,
         version: program.version + 1n,
         updated_at: new Date(),
       })
@@ -271,9 +298,10 @@ export class CapacityRepository {
       .selectAll()
       .where('program_id', '=', programId)
       .where((eb) =>
-        invoiceIds.length === 0
-          ? eb('status', '<>', 'RELEASED')
-          : eb.or([eb('status', '<>', 'RELEASED'), eb('invoice_id', 'in', [...invoiceIds])]),
+        eb.or([
+          eb('status', '<>', 'RELEASED'),
+          sql<boolean>`invoice_id = any(${[...invoiceIds]}::text[])`,
+        ]),
       )
       .orderBy('invoice_id')
       .execute();
@@ -283,19 +311,7 @@ export class CapacityRepository {
   async insertReservation(db: Executor, reservation: NewReservation): Promise<Reservation> {
     const row = await db
       .insertInto('reservations')
-      .values({
-        program_id: reservation.programId,
-        invoice_id: reservation.invoiceId,
-        status: 'ACTIVE',
-        origin: reservation.origin,
-        invoice_amount_minor: reservation.invoiceAmountMinor,
-        invoice_currency: reservation.invoiceCurrency,
-        booked_minor: reservation.bookedMinor,
-        fx_rate: reservation.fx?.rateScaled ?? null,
-        fx_scale: reservation.fx?.scale ?? null,
-        fx_source: reservation.fx?.source ?? null,
-        fx_as_of: reservation.fx?.asOf ?? null,
-      })
+      .values(reservationValues(reservation))
       .returningAll()
       .executeTakeFirstOrThrow();
     return toReservation(row);
@@ -314,6 +330,12 @@ export class CapacityRepository {
         invoice_released_minor: balances.invoiceReleasedMinor,
         booked_minor: balances.bookedMinor,
         released_minor: balances.releasedMinor,
+        ...(balances.allocationBase === undefined
+          ? {}
+          : {
+              allocation_base_invoice_minor: balances.allocationBase.invoiceReleasedMinor,
+              allocation_base_released_minor: balances.allocationBase.releasedMinor,
+            }),
         updated_at: updatedAt,
       })
       .where('id', '=', reservationId)
@@ -369,13 +391,27 @@ export class CapacityRepository {
     return toRelease(row);
   }
 
-  async appendLedger(db: Executor, entries: readonly NewLedgerEntry[]): Promise<void> {
-    if (entries.length === 0) {
-      return;
+  async insertReservations(
+    db: Executor,
+    reservations: readonly NewReservation[],
+  ): Promise<Map<string, string>> {
+    const ids = new Map<string, string>();
+    for (const chunk of chunks(reservations, INSERT_CHUNK)) {
+      const rows = await db
+        .insertInto('reservations')
+        .values(chunk.map(reservationValues))
+        .returning(['id', 'invoice_id'])
+        .execute();
+      for (const row of rows) {
+        ids.set(row.invoice_id, row.id);
+      }
     }
-    await db
-      .insertInto('ledger_entries')
-      .values([...entries])
-      .execute();
+    return ids;
+  }
+
+  async appendLedger(db: Executor, entries: readonly NewLedgerEntry[]): Promise<void> {
+    for (const chunk of chunks(entries, INSERT_CHUNK)) {
+      await db.insertInto('ledger_entries').values(chunk).execute();
+    }
   }
 }

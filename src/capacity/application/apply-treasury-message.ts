@@ -14,8 +14,12 @@ import {
 import { CapacityError } from '../domain/errors';
 import { type Program } from '../domain/model';
 import { decideOrdering } from '../domain/ordering';
-import { planReconciliation, type ReconciliationPlan } from '../domain/reconciliation';
-import { CapacityRepository } from '../infrastructure/capacity.repository';
+import {
+  planReconciliation,
+  type ReconciliationChange,
+  type ReconciliationPlan,
+} from '../domain/reconciliation';
+import { CapacityRepository, type NewReservation } from '../infrastructure/capacity.repository';
 import { type MessageSource, TreasuryRepository } from '../infrastructure/treasury.repository';
 import { ReleaseProcessor } from './release-processor';
 
@@ -40,6 +44,14 @@ export interface ApplyTreasuryResult {
 
 type ApplyResult = { applied: true } | { applied: false; reason: string };
 
+type HandleResult = ApplyResult & { deadLettered: number };
+
+interface Candidate {
+  readonly parsed: ReadableTreasuryMessage;
+  readonly rawValue: string;
+  readonly source: MessageSource;
+}
+
 const APPLIED: ApplyResult = { applied: true };
 
 function rejected(reason: string): ApplyResult {
@@ -58,13 +70,11 @@ export class ApplyTreasuryMessage {
   execute(inbound: InboundTreasuryMessage): Promise<ApplyTreasuryResult> {
     const { envelope } = inbound.parsed;
     return this.db.transaction().execute(async (trx) => {
-      await this.treasury.lockProgramStream(trx, envelope.programId);
+      const current = await this.treasury.lockStream(trx, envelope.programId);
       if (await this.treasury.isProcessed(trx, envelope.messageId)) {
         return { outcome: 'DUPLICATE', reason: null, drained: 0, deadLettered: 0 };
       }
 
-      const program = await this.capacity.lockProgram(trx, envelope.programId);
-      const current = program?.treasuryRevision ?? 0n;
       const revision = BigInt(envelope.revision);
       const isValidSnapshot = inbound.parsed.message?.type === TreasuryMessageType.ProgramSnapshot;
       const decision = decideOrdering(current, revision, isValidSnapshot);
@@ -80,18 +90,17 @@ export class ApplyTreasuryMessage {
       }
 
       await this.treasury.recordProcessed(trx, processed(inbound, 'APPLIED', null));
-      const result = await this.applyOne(trx, program, inbound.parsed);
-      let deadLettered = 0;
-      if (!result.applied) {
-        await this.reject(trx, envelope, inbound.rawValue, inbound.source, result.reason);
-        deadLettered += 1;
-      }
+      const result = await this.handle(trx, current, {
+        parsed: inbound.parsed,
+        rawValue: inbound.rawValue,
+        source: inbound.source,
+      });
       const drain = await this.drain(trx, envelope.programId);
       return {
         outcome: result.applied ? 'APPLIED' : 'REJECTED',
         reason: result.applied ? null : result.reason,
         drained: drain.drained,
-        deadLettered: deadLettered + drain.deadLettered,
+        deadLettered: result.deadLettered + drain.deadLettered,
       };
     });
   }
@@ -109,14 +118,21 @@ export class ApplyTreasuryMessage {
       programId: envelope.programId,
       revision: BigInt(envelope.revision),
       rawValue: inbound.rawValue,
+      rejected: false,
       source: inbound.source,
     });
     if (parked) {
       return { outcome: 'PARKED', reason, drained: 0, deadLettered: 0 };
     }
     const conflict = `Another message is already parked for revision ${envelope.revision}`;
-    await this.reject(trx, envelope, inbound.rawValue, inbound.source, conflict);
-    return { outcome: 'REJECTED', reason: conflict, drained: 0, deadLettered: 1 };
+    const deadLettered = await this.reject(
+      trx,
+      envelope,
+      inbound.rawValue,
+      inbound.source,
+      conflict,
+    );
+    return { outcome: 'REJECTED', reason: conflict, drained: 0, deadLettered };
   }
 
   private async drain(
@@ -126,27 +142,65 @@ export class ApplyTreasuryMessage {
     let drained = 0;
     let deadLettered = 0;
     for (;;) {
-      const program = await this.capacity.lockProgram(trx, programId);
-      if (program === null) {
-        return { drained, deadLettered };
-      }
-      const next = await this.treasury.takePending(trx, programId, program.treasuryRevision + 1n);
+      const current = await this.treasury.lockStream(trx, programId);
+      const next = await this.treasury.takePending(trx, programId, current + 1n);
       if (next === null) {
         return { drained, deadLettered };
+      }
+      drained += 1;
+      if (next.rejected) {
+        await this.treasury.setStreamRevision(trx, programId, next.revision);
+        continue;
       }
       const parsed = parseTreasuryMessage(next.rawValue);
       if (parsed.kind === 'unreadable') {
         throw new Error(`Parked message ${next.messageId} is unreadable`);
       }
-      const result = await this.applyOne(trx, program, parsed);
-      drained += 1;
+      const result = await this.handle(trx, current, {
+        parsed,
+        rawValue: next.rawValue,
+        source: next.source,
+      });
+      deadLettered += result.deadLettered;
       if (result.applied) {
         await this.treasury.updateOutcome(trx, next.messageId, 'APPLIED', null);
-        continue;
       }
-      await this.reject(trx, parsed.envelope, next.rawValue, next.source, result.reason);
-      deadLettered += 1;
     }
+  }
+
+  private async handle(
+    trx: DbTransaction,
+    current: bigint,
+    candidate: Candidate,
+  ): Promise<HandleResult> {
+    const { envelope } = candidate.parsed;
+    const revision = BigInt(envelope.revision);
+    const program = await this.capacity.lockProgram(trx, envelope.programId);
+    const result = await this.dispatch(trx, program, candidate.parsed);
+    if (result.applied) {
+      await this.treasury.setStreamRevision(trx, envelope.programId, revision);
+      return { ...result, deadLettered: 0 };
+    }
+    const deadLettered = await this.reject(
+      trx,
+      envelope,
+      candidate.rawValue,
+      candidate.source,
+      result.reason,
+    );
+    if (revision === current + 1n) {
+      await this.treasury.setStreamRevision(trx, envelope.programId, revision);
+      return { ...result, deadLettered };
+    }
+    await this.treasury.park(trx, {
+      messageId: envelope.messageId,
+      programId: envelope.programId,
+      revision,
+      rawValue: candidate.rawValue,
+      rejected: true,
+      source: candidate.source,
+    });
+    return { ...result, deadLettered };
   }
 
   private async reject(
@@ -155,29 +209,18 @@ export class ApplyTreasuryMessage {
     rawValue: string,
     source: MessageSource,
     reason: string,
-  ): Promise<void> {
+  ): Promise<number> {
     await this.treasury.updateOutcome(trx, envelope.messageId, 'REJECTED', reason);
-    await this.treasury.addDeadLetter(trx, {
+    const added = await this.treasury.addDeadLetter(trx, {
       messageId: envelope.messageId,
       programId: envelope.programId,
       revision: BigInt(envelope.revision),
       reason,
-      rawValue,
+      key: Buffer.from(envelope.programId, 'utf8'),
+      payload: Buffer.from(rawValue, 'utf8'),
       source,
     });
-  }
-
-  private async applyOne(
-    trx: DbTransaction,
-    program: Program | null,
-    parsed: ReadableTreasuryMessage,
-  ): Promise<ApplyResult> {
-    const revision = BigInt(parsed.envelope.revision);
-    const result = await this.dispatch(trx, program, parsed);
-    if (!result.applied && program !== null && revision === program.treasuryRevision + 1n) {
-      await this.treasury.setTreasuryRevision(trx, program.id, revision);
-    }
-    return result;
+    return added ? 1 : 0;
   }
 
   private async dispatch(
@@ -210,9 +253,8 @@ export class ApplyTreasuryMessage {
     program: Program | null,
     message: ProgramLimitSet,
   ): Promise<ApplyResult> {
-    const revision = BigInt(message.revision);
     if (program === null) {
-      await this.createProgram(trx, message, message.limit, revision);
+      await this.createProgram(trx, message, message.limit);
       return APPLIED;
     }
     if (program.currency !== message.currency) {
@@ -223,7 +265,6 @@ export class ApplyTreasuryMessage {
     const updated = await this.capacity.updateProgram(trx, program, {
       limitMinor: message.limit,
       utilisedMinor: program.utilisedMinor,
-      treasuryRevision: revision,
     });
     await this.capacity.appendLedger(trx, [
       ledger(updated, message.messageId, {
@@ -254,7 +295,6 @@ export class ApplyTreasuryMessage {
       actor: { subject: TREASURY_ACTOR, correlationId: null },
       sourceMessageId: message.messageId,
     });
-    await this.treasury.setTreasuryRevision(trx, program.id, BigInt(message.revision));
     return APPLIED;
   }
 
@@ -287,7 +327,7 @@ export class ApplyTreasuryMessage {
         bookedMinor: entry.bookedAmount,
       })),
     });
-    const program = existing ?? (await this.createProgram(trx, message, message.limit, revision));
+    const program = existing ?? (await this.createProgram(trx, message, message.limit));
     await this.applyPlan(trx, program, plan, message);
     await this.treasury.recordDiscrepancies(trx, program.id, plan.discrepancies, {
       messageId: message.messageId,
@@ -303,12 +343,11 @@ export class ApplyTreasuryMessage {
     plan: ReconciliationPlan,
     message: ProgramSnapshot,
   ): Promise<void> {
-    const revision = BigInt(message.revision);
     const limitChanged = plan.limitMinor !== program.limitMinor;
     if (!limitChanged && plan.changes.length === 0) {
-      await this.treasury.setTreasuryRevision(trx, program.id, revision);
       return;
     }
+    const reservationIds = await this.writeChanges(trx, program, plan.changes);
     const entries: NewLedgerEntry[] = [];
     if (limitChanged) {
       entries.push(
@@ -321,7 +360,6 @@ export class ApplyTreasuryMessage {
     }
     let utilised = program.utilisedMinor;
     for (const change of plan.changes) {
-      const reservationId = await this.applyChange(trx, program, change);
       utilised += change.deltaMinor;
       entries.push(
         ledger(
@@ -331,7 +369,7 @@ export class ApplyTreasuryMessage {
             type: 'RECONCILE_ADJUST',
             delta_minor: change.deltaMinor,
             reason: change.reason,
-            reservation_id: reservationId,
+            reservation_id: reservationIds.get(invoiceIdOf(change)) ?? null,
           },
         ),
       );
@@ -339,48 +377,55 @@ export class ApplyTreasuryMessage {
     await this.capacity.updateProgram(trx, program, {
       limitMinor: plan.limitMinor,
       utilisedMinor: plan.utilisedAfterMinor,
-      treasuryRevision: revision,
     });
     await this.capacity.appendLedger(trx, entries);
   }
 
-  private async applyChange(
+  private async writeChanges(
     trx: DbTransaction,
     program: Program,
-    change: ReconciliationPlan['changes'][number],
-  ): Promise<string> {
-    if (change.kind === 'import') {
-      const reservation = await this.capacity.insertReservation(trx, {
-        programId: program.id,
-        invoiceId: change.entry.invoiceId,
-        origin: 'TREASURY',
-        invoiceAmountMinor: change.entry.invoiceAmountMinor,
-        invoiceCurrency: change.entry.invoiceCurrency,
-        bookedMinor: change.entry.bookedMinor,
-        fx: null,
+    changes: readonly ReconciliationChange[],
+  ): Promise<Map<string, string>> {
+    const imports: NewReservation[] = [];
+    const ids = new Map<string, string>();
+    for (const change of changes) {
+      if (change.kind === 'import') {
+        imports.push({
+          programId: program.id,
+          invoiceId: change.entry.invoiceId,
+          origin: 'TREASURY',
+          invoiceAmountMinor: change.entry.invoiceAmountMinor,
+          invoiceCurrency: change.entry.invoiceCurrency,
+          bookedMinor: change.entry.bookedMinor,
+          fx: null,
+        });
+        continue;
+      }
+      await this.capacity.updateReservation(trx, change.reservation.id, {
+        status: change.status,
+        invoiceReleasedMinor: change.invoiceReleasedAfterMinor,
+        bookedMinor: change.bookedAfterMinor,
+        releasedMinor: change.releasedAfterMinor,
+        allocationBase: change.allocationBase,
       });
-      return reservation.id;
+      ids.set(change.reservation.invoiceId, change.reservation.id);
     }
-    await this.capacity.updateReservation(trx, change.reservation.id, {
-      status: change.status,
-      invoiceReleasedMinor: change.invoiceReleasedAfterMinor,
-      bookedMinor: change.bookedAfterMinor,
-      releasedMinor: change.releasedAfterMinor,
-    });
-    return change.reservation.id;
+    const imported = await this.capacity.insertReservations(trx, imports);
+    for (const [invoiceId, id] of imported) {
+      ids.set(invoiceId, id);
+    }
+    return ids;
   }
 
   private async createProgram(
     trx: DbTransaction,
     message: ProgramLimitSet | ProgramSnapshot,
     limitMinor: bigint,
-    revision: bigint,
   ): Promise<Program> {
     const program = await this.capacity.insertProgram(trx, {
       id: message.programId,
       currency: message.currency,
       limitMinor,
-      treasuryRevision: revision,
     });
     await this.capacity.appendLedger(trx, [
       ledger(program, message.messageId, {
@@ -428,6 +473,10 @@ function ledger(
   };
 }
 
+function invoiceIdOf(change: ReconciliationChange): string {
+  return change.kind === 'import' ? change.entry.invoiceId : change.reservation.invoiceId;
+}
+
 function virtualProgram(message: ProgramSnapshot): Program {
   return {
     id: message.programId,
@@ -435,7 +484,6 @@ function virtualProgram(message: ProgramSnapshot): Program {
     limitMinor: message.limit,
     utilisedMinor: 0n,
     version: 0n,
-    treasuryRevision: 0n,
     createdAt: new Date(0),
     updatedAt: new Date(0),
   };
