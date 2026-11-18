@@ -116,13 +116,13 @@ export class TreasuryConsumer implements OnApplicationBootstrap, OnApplicationSh
     const admin = this.kafka.admin();
     await admin.connect();
     try {
-      await admin.createTopics({
-        waitForLeaders: true,
-        topics: [
-          { topic: this.config.KAFKA_TOPIC, numPartitions: this.config.KAFKA_TOPIC_PARTITIONS },
-          { topic: this.config.KAFKA_DLQ_TOPIC, numPartitions: this.config.KAFKA_TOPIC_PARTITIONS },
-        ],
-      });
+      const existing = new Set(await admin.listTopics());
+      const missing = [this.config.KAFKA_TOPIC, this.config.KAFKA_DLQ_TOPIC]
+        .filter((topic) => !existing.has(topic))
+        .map((topic) => ({ topic, numPartitions: this.config.KAFKA_TOPIC_PARTITIONS }));
+      if (missing.length > 0) {
+        await admin.createTopics({ waitForLeaders: true, topics: missing });
+      }
     } finally {
       await admin.disconnect();
     }
