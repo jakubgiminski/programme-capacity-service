@@ -1,6 +1,11 @@
 import { ConfigValidationError, loadConfig } from './config';
 
-const baseEnv = { DATABASE_URL: 'postgres://app:app@localhost:5432/app' };
+const baseEnv = {
+  DATABASE_URL: 'postgres://app:app@localhost:5432/app',
+  JWT_ISSUER: 'https://issuer.test',
+  JWT_AUDIENCE: 'programme-capacity-service',
+  JWT_PUBLIC_KEY_FILE: '.dev-keys/public.pem',
+};
 
 describe('loadConfig', () => {
   it('applies defaults for optional settings', () => {
@@ -26,16 +31,37 @@ describe('loadConfig', () => {
   });
 
   it('rejects a missing database url', () => {
-    expect(() => loadConfig({})).toThrow(ConfigValidationError);
+    expect(() => loadConfig({ ...baseEnv, DATABASE_URL: undefined })).toThrow(
+      ConfigValidationError,
+    );
   });
 
   it('rejects a non-postgres database url', () => {
-    expect(() => loadConfig({ DATABASE_URL: 'mysql://localhost/app' })).toThrow(/DATABASE_URL/);
+    expect(() => loadConfig({ ...baseEnv, DATABASE_URL: 'mysql://localhost/app' })).toThrow(
+      /DATABASE_URL/,
+    );
   });
 
   it('rejects invalid boolean flags and ports', () => {
     expect(() => loadConfig({ ...baseEnv, KAFKA_ENABLED: 'yes' })).toThrow(/KAFKA_ENABLED/);
     expect(() => loadConfig({ ...baseEnv, PORT: '70000' })).toThrow(/PORT/);
+  });
+
+  it('requires exactly one JWT key source', () => {
+    const { JWT_PUBLIC_KEY_FILE, ...withoutKey } = baseEnv;
+
+    expect(() => loadConfig(withoutKey)).toThrow(/exactly one/);
+    expect(() =>
+      loadConfig({ ...baseEnv, JWT_JWKS_URL: 'https://issuer.test/.well-known/jwks.json' }),
+    ).toThrow(/exactly one/);
+    expect(
+      loadConfig({ ...withoutKey, JWT_JWKS_URL: 'https://issuer.test/jwks' }).JWT_JWKS_URL,
+    ).toBe('https://issuer.test/jwks');
+  });
+
+  it('requires an issuer and audience', () => {
+    expect(() => loadConfig({ ...baseEnv, JWT_ISSUER: undefined })).toThrow(/JWT_ISSUER/);
+    expect(() => loadConfig({ ...baseEnv, JWT_AUDIENCE: '' })).toThrow(/JWT_AUDIENCE/);
   });
 
   it('rejects an empty broker list', () => {
